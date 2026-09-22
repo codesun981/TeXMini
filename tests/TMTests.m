@@ -2,6 +2,7 @@
 // 用法：tests/run_tests.sh
 #import <Foundation/Foundation.h>
 #import "TMDocument.h"
+#import "TMEditActions.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -59,6 +60,45 @@ TM_TEST(test_real_save_clears_scratch_and_dirty) {
     TM_ASSERT_TRUE(!doc.isScratch);
     TM_ASSERT_TRUE(!doc.isDirty);
     TM_ASSERT_EQ_STR(doc.displayName, @"tmtest_real.tex");
+}
+
+#pragma mark - TMEditActions
+
+TM_TEST(test_toggle_comment_adds_prefix_to_every_line) {
+    TM_ASSERT_EQ_STR([TMEditActions toggledCommentForLines:@"a\n  b\n"], @"% a\n%   b\n");
+}
+
+TM_TEST(test_toggle_comment_removes_prefix_when_all_nonblank_lines_commented) {
+    TM_ASSERT_EQ_STR([TMEditActions toggledCommentForLines:@"% a\n\n  %b\n"], @"a\n\n  b\n");
+}
+
+TM_TEST(test_toggle_comment_mixed_lines_comments_everything) {
+    TM_ASSERT_EQ_STR([TMEditActions toggledCommentForLines:@"% a\nb"], @"% % a\n% b");
+}
+
+TM_TEST(test_toggle_comment_blank_lines_stay_blank) {
+    TM_ASSERT_EQ_STR([TMEditActions toggledCommentForLines:@"a\n\nb"], @"% a\n\n% b");
+}
+
+TM_TEST(test_indent_lines) {
+    TM_ASSERT_EQ_STR([TMEditActions indentedLines:@"a\n\nb\n" indent:@"  "], @"  a\n\n  b\n");
+}
+
+TM_TEST(test_outdent_lines_removes_up_to_width_spaces_or_one_tab) {
+    TM_ASSERT_EQ_STR([TMEditActions outdentedLines:@"    a\n b\n\tc\nd" width:2], @"  a\nb\nc\nd");
+}
+
+TM_TEST(test_environment_to_close) {
+    TM_ASSERT_EQ_STR([TMEditActions environmentToCloseInLine:@"  \\begin{itemize}"], @"itemize");
+    TM_ASSERT_EQ_STR([TMEditActions environmentToCloseInLine:@"\\begin{align*}"], @"align*");
+    TM_ASSERT_NIL([TMEditActions environmentToCloseInLine:@"\\begin{x} text \\end{x}"]);
+    TM_ASSERT_NIL([TMEditActions environmentToCloseInLine:@"% \\begin{x}"]);
+    TM_ASSERT_NIL([TMEditActions environmentToCloseInLine:@"plain text"]);
+}
+
+TM_TEST(test_leading_whitespace) {
+    TM_ASSERT_EQ_STR([TMEditActions leadingWhitespaceOfLine:@"  \t x"], @"  \t ");
+    TM_ASSERT_EQ_STR([TMEditActions leadingWhitespaceOfLine:@"x"], @"");
 }
 
 #pragma mark - Runner

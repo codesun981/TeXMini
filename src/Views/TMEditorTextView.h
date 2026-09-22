@@ -15,6 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)jumpToLine:(NSInteger)lineNumber column:(NSInteger)column;
 - (void)rehighlightAll;
 
+/// 以下动作作用于选区覆盖的整行，可撤销。
+- (IBAction)toggleComment:(nullable id)sender;
+- (IBAction)indentSelection:(nullable id)sender;
+- (IBAction)outdentSelection:(nullable id)sender;
+
 @end
 
 NS_ASSUME_NONNULL_END

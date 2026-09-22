@@ -636,6 +636,27 @@
 
 #pragma mark - 公共导航动作
 
+- (void)promptGotoLine {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"跳转到行";
+    alert.informativeText = [NSString stringWithFormat:@"当前第 %ld 行，请输入目标行号：", (long)self.currentCursorLine];
+    [alert addButtonWithTitle:@"跳转"];
+    [alert addButtonWithTitle:@"取消"];
+
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+    field.placeholderString = @"行号";
+    alert.accessoryView = field;
+    alert.window.initialFirstResponder = field;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSInteger line = field.integerValue;
+        if (line > 0) {
+            [self.editorTextView jumpToLine:line column:1];
+            [self.window makeFirstResponder:self.editorTextView];
+        }
+    }
+}
+
 - (IBAction)toggleSidebar:(nullable id)sender {
     [self toggleOutlineSidebar];
 }

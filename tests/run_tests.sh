@@ -4,11 +4,12 @@ set -e
 cd "$(dirname "$0")/.."
 mkdir -p build
 
-clang -fobjc-arc -O0 -g \
+clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     -framework Foundation \
     -Isrc/Models \
     -Isrc/Services \
     src/Models/TMDocument.m \
+    src/Services/TMEditActions.m \
     tests/TMTests.m \
     -o build/tmtests
 

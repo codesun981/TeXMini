@@ -72,7 +72,7 @@
     fileMenuItem.submenu = fileMenu;
     [mainMenu addItem:fileMenuItem];
 
-    // 3. 编辑菜单 (Edit - 标准系统剪切、复制、撤销)
+    // 3. 编辑菜单 (Edit - 标准系统剪切、复制、撤销 + 查找 + LaTeX 编辑动作)
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"编辑"];
     [editMenu addItemWithTitle:@"撤销" action:@selector(undo:) keyEquivalent:@"z"];
@@ -82,6 +82,26 @@
     [editMenu addItemWithTitle:@"复制" action:@selector(copy:) keyEquivalent:@"c"];
     [editMenu addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
     [editMenu addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *findItem = [[NSMenuItem alloc] initWithTitle:@"查找" action:nil keyEquivalent:@""];
+    NSMenu *findMenu = [[NSMenu alloc] initWithTitle:@"查找"];
+    [self addFinderItemTo:findMenu title:@"查找…" key:@"f" mask:NSEventModifierFlagCommand tag:NSTextFinderActionShowFindInterface];
+    [self addFinderItemTo:findMenu title:@"查找并替换…" key:@"f" mask:NSEventModifierFlagCommand | NSEventModifierFlagOption tag:NSTextFinderActionShowReplaceInterface];
+    [self addFinderItemTo:findMenu title:@"查找下一个" key:@"g" mask:NSEventModifierFlagCommand tag:NSTextFinderActionNextMatch];
+    [self addFinderItemTo:findMenu title:@"查找上一个" key:@"g" mask:NSEventModifierFlagCommand | NSEventModifierFlagShift tag:NSTextFinderActionPreviousMatch];
+    [self addFinderItemTo:findMenu title:@"使用所选内容查找" key:@"e" mask:NSEventModifierFlagCommand tag:NSTextFinderActionSetSearchString];
+    [self addFinderItemTo:findMenu title:@"隐藏查找栏" key:@"" mask:0 tag:NSTextFinderActionHideFindInterface];
+    findItem.submenu = findMenu;
+    [editMenu addItem:findItem];
+    [editMenu addItemWithTitle:@"跳转到行…" action:@selector(gotoLineAction:) keyEquivalent:@"l"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+
+    [editMenu addItemWithTitle:@"切换注释" action:@selector(toggleComment:) keyEquivalent:@"/"];
+    [editMenu addItemWithTitle:@"增加缩进" action:@selector(indentSelection:) keyEquivalent:@"]"];
+    [editMenu addItemWithTitle:@"减少缩进" action:@selector(outdentSelection:) keyEquivalent:@"["];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"拼写检查（输入时）" action:@selector(toggleContinuousSpellChecking:) keyEquivalent:@""];
     editMenuItem.submenu = editMenu;
     [mainMenu addItem:editMenuItem];
 
@@ -103,7 +123,7 @@
     [viewMenu addItemWithTitle:@"放大" action:@selector(zoomInAction:) keyEquivalent:@"+"];
     [viewMenu addItemWithTitle:@"缩小" action:@selector(zoomOutAction:) keyEquivalent:@"-"];
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    [viewMenu addItemWithTitle:@"切换日志抽屉" action:@selector(toggleLogAction:) keyEquivalent:@"l"];
+    [viewMenu addItemWithTitle:@"切换日志抽屉" action:@selector(toggleLogAction:) keyEquivalent:@"L"];
     viewMenuItem.submenu = viewMenu;
     [mainMenu addItem:viewMenuItem];
 
@@ -119,6 +139,17 @@
 }
 
 #pragma mark - 菜单快捷响应
+
+- (void)addFinderItemTo:(NSMenu *)menu title:(NSString *)title key:(NSString *)key mask:(NSEventModifierFlags)mask tag:(NSInteger)tag {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:@selector(performTextFinderAction:) keyEquivalent:key];
+    item.keyEquivalentModifierMask = mask;
+    item.tag = tag;
+    [menu addItem:item];
+}
+
+- (void)gotoLineAction:(id)sender {
+    [self.mainWindowController promptGotoLine];
+}
 
 - (void)newDocumentAction:(id)sender {
     if (self.mainWindowController) {

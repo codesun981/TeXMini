@@ -18,6 +18,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 有未保存更改时弹出 保存 / 不保存 / 取消；返回 YES 表示可以继续丢弃当前文档。
 - (BOOL)confirmDiscardChangesWithTitle:(NSString *)title;
 - (void)forwardSyncToPDF;
+/// 弹出输入框询问行号并跳转。
+- (void)promptGotoLine;
 - (void)toggleLogDrawer;
 - (void)toggleOutlineSidebar;
 - (void)zoomIn;
