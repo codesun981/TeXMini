@@ -79,7 +79,9 @@
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"保存" action:@selector(saveDocumentAction:) keyEquivalent:@"s"];
     [fileMenu addItemWithTitle:@"另存为…" action:@selector(saveDocumentAsAction:) keyEquivalent:@"S"];
-    [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"e"];
+    // ⌘E 已被“使用所选内容查找”占用（编辑器有焦点时会被抢走），导出改用 ⇧⌘E
+    [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"E"];
+    [fileMenu addItemWithTitle:@"在访达中显示 PDF" action:@selector(revealPDFAction:) keyEquivalent:@"R"];
     [fileMenu addItemWithTitle:@"打印 PDF…" action:@selector(printPDFAction:) keyEquivalent:@"p"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
@@ -270,9 +272,8 @@
         menuItem.state = self.mainWindowController.autoCompileEnabled ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
     }
-    if (action == @selector(exportPDFAction:)) {
-        NSURL *pdfURL = self.mainWindowController.documentModel.expectedPDFURL;
-        return pdfURL && [[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path];
+    if (action == @selector(exportPDFAction:) || action == @selector(revealPDFAction:)) {
+        return self.mainWindowController.currentPDFURL != nil;
     }
     if (action == @selector(printPDFAction:) || action == @selector(pdfFitWidthAction:) ||
         action == @selector(pdfActualSizeAction:) || action == @selector(pdfPreviousPageAction:) ||
@@ -340,25 +341,11 @@
 - (void)printPDFAction:(id)sender { [self.mainWindowController printPDF]; }
 
 - (void)exportPDFAction:(id)sender {
-    NSURL *pdfURL = self.mainWindowController.documentModel.expectedPDFURL;
-    if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) {
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"尚未生成 PDF";
-        alert.informativeText = @"请先按下 ⌘B 进行编译，成功生成 PDF 后方可导出。";
-        [alert runModal];
-        return;
-    }
+    [self.mainWindowController exportPDF];
+}
 
-    NSSavePanel *panel = [NSSavePanel savePanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"pdf"] ?: UTTypePDF];
-    panel.nameFieldStringValue = pdfURL.lastPathComponent;
-    if ([panel runModal] == NSModalResponseOK && panel.URL) {
-        NSError *err = nil;
-        [[NSFileManager defaultManager] removeItemAtURL:panel.URL error:nil];
-        if (![[NSFileManager defaultManager] copyItemAtURL:pdfURL toURL:panel.URL error:&err]) {
-            [[NSAlert alertWithError:err] runModal];
-        }
-    }
+- (void)revealPDFAction:(id)sender {
+    [self.mainWindowController revealPDFInFinder];
 }
 
 @end

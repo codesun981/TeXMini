@@ -13,13 +13,15 @@
 
 static NSString *const kTMDefaultsEngine = @"TMEngine";
 static NSString *const kTMDefaultsFontSize = @"TMEditorFontSize";
-static NSString *const kTMDefaultsOutlineWidth = @"TMOutlineWidth";
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 @interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate>
 
-@property (nonatomic, strong) NSSplitView *mainSplitView;
+// 外层：系统 NSSplitViewController 负责侧边栏折叠、分割线隐藏、宽度记忆
+@property (nonatomic, strong) NSSplitViewController *mainSplitViewController;
+@property (nonatomic, strong) NSSplitViewItem *sidebarItem;
 @property (nonatomic, strong) TMOutlineSidebarView *outlineSidebarView;
+// 内层：代码 | PDF
 @property (nonatomic, strong) NSSplitView *splitView;
 @property (nonatomic, strong) TMEditorTextView *editorTextView;
 @property (nonatomic, strong) NSScrollView *editorScrollView;
@@ -34,8 +36,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 @property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
 @property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
-@property (nonatomic, assign) CGFloat lastOutlineWidth;
-@property (nonatomic, assign) BOOL isOutlineCollapsed;
+@property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 
 @end
 
@@ -62,9 +63,6 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         _documentModel = document ?: [TMDocument documentWithDefaultTemplate];
         _currentCursorLine = 1;
         _currentCursorCol = 1;
-        CGFloat savedWidth = [defaults doubleForKey:kTMDefaultsOutlineWidth];
-        _lastOutlineWidth = (savedWidth >= 160.0 && savedWidth <= 380.0) ? savedWidth : 220.0;
-        _isOutlineCollapsed = [defaults boolForKey:kTMDefaultsOutlineCollapsed];
         _autoCompileEnabled = [defaults boolForKey:@"TMAutoCompile"];
         window.delegate = self;
 
@@ -73,6 +71,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [TMCompiler sharedCompiler].delegate = self;
         [self restorePersistedPreferences];
         [self loadDocumentIntoEditor];
+
+        // 侧边栏折叠状态：等 UI 建好后再应用，避免动画
+        self.sidebarItem.collapsed = [defaults boolForKey:kTMDefaultsOutlineCollapsed];
 
         // 窗口位置/大小交给系统自动保存
         [window setFrameAutosaveName:@"TMMainWindow"];
@@ -96,22 +97,30 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     contentView.wantsLayer = YES;
     NSRect bounds = contentView.bounds;
 
-    // 1. 外层水平分栏 (MainSplitView: 左大纲侧边栏 + 右工作区分栏)
-    _mainSplitView = [[NSSplitView alloc] initWithFrame:bounds];
-    _mainSplitView.vertical = YES;
-    _mainSplitView.dividerStyle = NSSplitViewDividerStyleThin;
-    _mainSplitView.delegate = self;
-    _mainSplitView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:_mainSplitView];
+    // 1. 外层分栏交给 NSSplitViewController：左大纲侧边栏 + 右工作区
+    _mainSplitViewController = [[NSSplitViewController alloc] init];
+    _mainSplitViewController.splitView.vertical = YES;
+    _mainSplitViewController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _mainSplitViewController.splitView.autosaveName = @"TMMainSplit";
+    _mainSplitViewController.view.translatesAutoresizingMaskIntoConstraints = NO;
 
     // 1.1 大纲侧边栏
-    _outlineSidebarView = [[TMOutlineSidebarView alloc] initWithFrame:NSMakeRect(0, 0, _lastOutlineWidth, bounds.size.height)];
+    CGFloat sidebarWidth = 220.0;
+    _outlineSidebarView = [[TMOutlineSidebarView alloc] initWithFrame:NSMakeRect(0, 0, sidebarWidth, bounds.size.height)];
     _outlineSidebarView.delegate = self;
-    [_mainSplitView addSubview:_outlineSidebarView];
+    NSViewController *sidebarVC = [[NSViewController alloc] init];
+    sidebarVC.view = _outlineSidebarView;
+    _sidebarItem = [NSSplitViewItem sidebarWithViewController:sidebarVC];
+    _sidebarItem.minimumThickness = 160.0;
+    _sidebarItem.maximumThickness = 380.0;
+    _sidebarItem.canCollapse = YES;
+    _sidebarItem.collapseBehavior = NSSplitViewItemCollapseBehaviorPreferResizingSplitViewWithFixedSiblings;
+    _sidebarItem.holdingPriority = NSLayoutPriorityDefaultHigh;
+    [_mainSplitViewController addSplitViewItem:_sidebarItem];
 
     // 1.2 内层工作区分栏 (ContentSplitView: 代码编辑 + PDF 预览)
-    CGFloat contentWidth = MAX(400, bounds.size.width - _lastOutlineWidth - 1.0);
-    _splitView = [[NSSplitView alloc] initWithFrame:NSMakeRect(_lastOutlineWidth + 1.0, 0, contentWidth, bounds.size.height)];
+    CGFloat contentWidth = MAX(400, bounds.size.width - sidebarWidth - 1.0);
+    _splitView = [[NSSplitView alloc] initWithFrame:NSMakeRect(0, 0, contentWidth, bounds.size.height)];
     _splitView.vertical = YES;
     _splitView.dividerStyle = NSSplitViewDividerStyleThin;
     _splitView.delegate = self;
@@ -170,12 +179,16 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
     [_splitView addSubview:_pdfContainerView];
 
-    // 将工作区分栏加入外层主分栏
-    [_mainSplitView addSubview:_splitView];
+    // 将工作区分栏包成 NSSplitViewItem 加入外层
+    NSViewController *contentVC = [[NSViewController alloc] init];
+    contentVC.view = _splitView;
+    NSSplitViewItem *contentItem = [NSSplitViewItem splitViewItemWithViewController:contentVC];
+    contentItem.minimumThickness = 400.0;
+    contentItem.holdingPriority = NSLayoutPriorityDefaultLow;
+    [_mainSplitViewController addSplitViewItem:contentItem];
 
-    // 设置侧边栏固定倾向、工作区拉伸倾向
-    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultHigh forSubviewAtIndex:0];
-    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
+    NSView *mainSplitView = _mainSplitViewController.view;
+    [contentView addSubview:mainSplitView];
 
     // 2. 抽屉式日志视图
     _logDrawer = [[TMLogDrawerView alloc] init];
@@ -190,10 +203,10 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
     // 自动布局约束
     [NSLayoutConstraint activateConstraints:@[
-        [_mainSplitView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
-        [_mainSplitView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
-        [_mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
-        [_mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
+        [mainSplitView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
+        [mainSplitView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
 
         [_logDrawer.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
         [_logDrawer.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
@@ -204,9 +217,6 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [_statusBar.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
         [_statusBar.heightAnchor constraintEqualToConstant:28]
     ]];
-
-    // 初始均分左右分栏与大纲侧边栏
-    [self layoutMainSplitView];
 }
 
 - (void)setupPlaceholderView {
@@ -288,98 +298,42 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     [[NSUserDefaults standardUserDefaults] setDouble:self.editorTextView.editorFontSize forKey:kTMDefaultsFontSize];
 }
 
-#pragma mark - NSSplitView 分栏布局与控制
-
-- (void)layoutMainSplitView {
-    NSRect bounds = self.mainSplitView.bounds;
-    if (bounds.size.width <= 0 || bounds.size.height <= 0) return;
-
-    CGFloat d = self.mainSplitView.dividerThickness;
-
-    if (self.isOutlineCollapsed) {
-        self.outlineSidebarView.hidden = YES;
-        self.outlineSidebarView.frame = NSMakeRect(0, 0, 0, bounds.size.height);
-        self.splitView.frame = bounds;
-    } else {
-        self.outlineSidebarView.hidden = NO;
-        CGFloat sidebarW = self.lastOutlineWidth;
-        if (sidebarW < 160.0 || sidebarW > 380.0) {
-            sidebarW = 220.0;
-        }
-        if (bounds.size.width > 600.0) {
-            sidebarW = MIN(sidebarW, bounds.size.width - 400.0);
-        }
-        CGFloat contentW = MAX(0, bounds.size.width - sidebarW - d);
-
-        self.outlineSidebarView.frame = NSMakeRect(0, 0, sidebarW, bounds.size.height);
-        self.splitView.frame = NSMakeRect(sidebarW + d, 0, contentW, bounds.size.height);
-    }
-    [self.splitView adjustSubviews];
-}
-
-#pragma mark - NSSplitViewDelegate (保证分栏永不塌陷、主侧边栏可折叠)
+#pragma mark - NSSplitViewDelegate (内层 代码|PDF 分栏，保证永不塌陷)
 
 - (BOOL)splitView:(NSSplitView *)splitView canCollapseSubview:(NSView *)subview {
     return NO;
 }
 
-- (BOOL)splitView:(NSSplitView *)splitView shouldHideDividerAtIndex:(NSInteger)dividerIndex {
-    if (splitView == self.mainSplitView && dividerIndex == 0) {
-        return self.isOutlineCollapsed || self.outlineSidebarView.isHidden || self.outlineSidebarView.frame.size.width <= 0;
-    }
-    return NO;
-}
-
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMinimumPosition ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == self.mainSplitView) {
-        return 160.0;
-    }
     return 280.0;
 }
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMaximumPosition ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == self.mainSplitView) {
-        return 380.0;
-    }
     return splitView.bounds.size.width - 280.0;
 }
 
 - (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize {
-    if (splitView == self.mainSplitView) {
-        [self layoutMainSplitView];
-    } else if (splitView == self.splitView) {
-        NSRect bounds = splitView.bounds;
-        CGFloat d = splitView.dividerThickness;
-        if (splitView.subviews.count >= 2) {
-            NSView *leftView = splitView.subviews[0];
-            NSView *rightView = splitView.subviews[1];
+    NSRect bounds = splitView.bounds;
+    CGFloat d = splitView.dividerThickness;
+    if (splitView.subviews.count >= 2) {
+        NSView *leftView = splitView.subviews[0];
+        NSView *rightView = splitView.subviews[1];
 
-            CGFloat leftWidth = leftView.frame.size.width;
-            if (leftWidth < 200 || oldSize.width < 200) {
-                leftWidth = floor((bounds.size.width - d) * 0.5);
-            } else {
-                CGFloat ratio = leftWidth / (oldSize.width - d);
-                leftWidth = floor((bounds.size.width - d) * ratio);
-            }
-
-            leftWidth = MAX(280.0, MIN(leftWidth, bounds.size.width - d - 280.0));
-            CGFloat rightWidth = bounds.size.width - d - leftWidth;
-
-            leftView.frame = NSMakeRect(0, 0, leftWidth, bounds.size.height);
-            rightView.frame = NSMakeRect(leftWidth + d, 0, rightWidth, bounds.size.height);
+        CGFloat leftWidth = leftView.frame.size.width;
+        if (leftWidth < 200 || oldSize.width < 200) {
+            leftWidth = floor((bounds.size.width - d) * 0.5);
         } else {
-            [splitView adjustSubviews];
+            CGFloat ratio = leftWidth / (oldSize.width - d);
+            leftWidth = floor((bounds.size.width - d) * ratio);
         }
-    }
-}
 
-- (void)splitViewDidResizeSubviews:(NSNotification *)notification {
-    if (notification.object == self.mainSplitView && !self.isOutlineCollapsed) {
-        CGFloat w = self.outlineSidebarView.frame.size.width;
-        if (w >= 160.0 && w <= 380.0) {
-            self.lastOutlineWidth = w;
-            [[NSUserDefaults standardUserDefaults] setDouble:w forKey:kTMDefaultsOutlineWidth];
-        }
+        leftWidth = MAX(280.0, MIN(leftWidth, bounds.size.width - d - 280.0));
+        CGFloat rightWidth = bounds.size.width - d - leftWidth;
+
+        leftView.frame = NSMakeRect(0, 0, leftWidth, bounds.size.height);
+        rightView.frame = NSMakeRect(leftWidth + d, 0, rightWidth, bounds.size.height);
+    } else {
+        [splitView adjustSubviews];
     }
 }
 
@@ -392,14 +346,19 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [self.editorTextView rehighlightAll];
         [self scheduleOutlineUpdateImmediate:YES];
         [self refreshWindowTitle];
+        [self showPDFIfExistsAtURL:self.documentModel.expectedPDFURL];
+    }
+}
 
-        // 判断是否存在对应 PDF
-        if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
-            [self.pdfView loadPDFFromURL:self.documentModel.expectedPDFURL];
-            self.pdfPlaceholderView.hidden = YES;
-        } else {
-            self.pdfPlaceholderView.hidden = NO;
-        }
+/// 若 url 处已有 PDF 就载入预览并记为 currentPDFURL；否则显示占位提示。
+- (void)showPDFIfExistsAtURL:(nullable NSURL *)url {
+    if (url && [[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+        self.currentPDFURL = url;
+        [self.pdfView loadPDFFromURL:url];
+        self.pdfPlaceholderView.hidden = YES;
+    } else {
+        self.currentPDFURL = nil;
+        self.pdfPlaceholderView.hidden = NO;
     }
 }
 
@@ -496,13 +455,53 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     [self refreshWindowTitle];
     [TMRecentFiles noteFileURL:panel.URL];
     // 换了目录后旧的 PDF 不再对应，重新判断预览
-    if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
-        [self.pdfView loadPDFFromURL:self.documentModel.expectedPDFURL];
-        self.pdfPlaceholderView.hidden = YES;
-    } else {
-        self.pdfPlaceholderView.hidden = NO;
-    }
+    [self showPDFIfExistsAtURL:self.documentModel.expectedPDFURL];
     return YES;
+}
+
+#pragma mark - PDF 导出
+
+- (BOOL)exportPDF {
+    NSURL *pdfURL = self.currentPDFURL;
+    if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"尚未生成 PDF";
+        alert.informativeText = @"请先按下 ⌘B 进行编译，成功生成 PDF 后方可导出。";
+        [alert runModal];
+        return NO;
+    }
+
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = @[UTTypePDF];
+    panel.canCreateDirectories = YES;
+    // 默认文件名跟随用户的 .tex 名字；暂存文档给一个友好名字而不是 TeXMini_Document.pdf
+    if (self.documentModel.isScratch || !self.documentModel.fileURL) {
+        panel.nameFieldStringValue = @"document.pdf";
+    } else {
+        panel.nameFieldStringValue = pdfURL.lastPathComponent;
+        panel.directoryURL = self.documentModel.fileURL.URLByDeletingLastPathComponent;
+    }
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return NO;
+    if ([panel.URL isEqual:pdfURL]) return YES; // 选了原位置，无需复制
+
+    NSError *err = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:panel.URL.path]) {
+        [fm removeItemAtURL:panel.URL error:nil];
+    }
+    if (![fm copyItemAtURL:pdfURL toURL:panel.URL error:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return NO;
+    }
+    [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已导出 %@", panel.URL.lastPathComponent]];
+    return YES;
+}
+
+- (void)revealPDFInFinder {
+    NSURL *pdfURL = self.currentPDFURL;
+    if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) return;
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[pdfURL]];
 }
 
 #pragma mark - NSWindowDelegate
@@ -604,6 +603,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     NSUInteger warnings = [TMLogParser countOfKind:TMLogIssueWarning inIssues:issues];
     NSUInteger badBoxes = [TMLogParser countOfKind:TMLogIssueBadBox inIssues:issues];
     [self.statusBar showSuccessStateWithDuration:durationSeconds warnings:warnings badBoxes:badBoxes];
+    self.currentPDFURL = pdfURL;
     self.pdfPlaceholderView.hidden = YES;
     [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
     [self runPendingAutoCompileIfNeeded];
@@ -625,10 +625,10 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 #pragma mark - SyncTeX 双向同步
 
 - (void)forwardSyncToPDF {
-    if (!self.documentModel.fileURL || !self.documentModel.expectedPDFURL) return;
+    if (!self.documentModel.fileURL || !self.currentPDFURL) return;
 
     NSString *src = self.documentModel.fileURL.path;
-    NSString *pdf = self.documentModel.expectedPDFURL.path;
+    NSString *pdf = self.currentPDFURL.path;
 
     TMSyncTeXResult *res = [TMSyncTeX forwardSearchLine:self.currentCursorLine
                                                  column:self.currentCursorCol
@@ -641,9 +641,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 }
 
 - (void)pdfViewDidRequestInverseSearchAtPoint:(NSPoint)pointOnPage pageIndex:(NSInteger)pageIndex pageBounds:(NSRect)pageBounds {
-    if (!self.documentModel.expectedPDFURL) return;
+    if (!self.currentPDFURL) return;
 
-    NSString *pdf = self.documentModel.expectedPDFURL.path;
+    NSString *pdf = self.currentPDFURL.path;
     TMSyncTeXResult *res = [TMSyncTeX inverseSearchPoint:pointOnPage
                                                pageIndex:pageIndex
                                               pageBounds:pageBounds
@@ -652,7 +652,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
     // SyncTeX 返回的文件名可能是相对 PDF 目录的路径；与当前文档不一致时不能盲目跳行。
     if (res.sourceFilePath.length > 0 && self.documentModel.fileURL) {
-        NSURL *pdfDir = self.documentModel.expectedPDFURL.URLByDeletingLastPathComponent;
+        NSURL *pdfDir = self.currentPDFURL.URLByDeletingLastPathComponent;
         NSURL *target = [NSURL fileURLWithPath:res.sourceFilePath relativeToURL:pdfDir];
         NSString *targetPath = target.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
         NSString *currentPath = self.documentModel.fileURL.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
@@ -755,21 +755,10 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 }
 
 - (void)toggleOutlineSidebar {
-    if (!self.isOutlineCollapsed) {
-        // 收起大纲
-        CGFloat currentW = self.outlineSidebarView.frame.size.width;
-        if (currentW >= 160.0 && currentW <= 380.0) {
-            self.lastOutlineWidth = currentW;
-        }
-        self.isOutlineCollapsed = YES;
-    } else {
-        // 展开大纲
-        self.isOutlineCollapsed = NO;
-    }
-    [[NSUserDefaults standardUserDefaults] setBool:self.isOutlineCollapsed forKey:kTMDefaultsOutlineCollapsed];
-
-    [self layoutMainSplitView];
-    [self.mainSplitView adjustSubviews];
+    // 交给系统：带动画、自动隐藏分割线、宽度由 autosave 记住
+    [self.mainSplitViewController toggleSidebar:nil];
+    // toggleSidebar: 的动画结束后 collapsed 才更新，这里记录目标状态
+    [[NSUserDefaults standardUserDefaults] setBool:!self.sidebarItem.isCollapsed forKey:kTMDefaultsOutlineCollapsed];
 }
 
 #pragma mark - TMOutlineSidebarViewDelegate
@@ -880,6 +869,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         NSToolbarSpaceItemIdentifier,
         @"CompileDoc",
         @"ForwardSync",
+        @"ExportPDF",
         @"CleanAux",
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
@@ -899,6 +889,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         NSToolbarSpaceItemIdentifier,
         @"CompileDoc",
         @"ForwardSync",
+        @"ExportPDF",
         @"CleanAux",
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
@@ -959,6 +950,13 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         item.image = [NSImage imageWithSystemSymbolName:@"arrow.right.circle" accessibilityDescription:@"Sync to PDF"];
         item.target = self;
         item.action = @selector(forwardSyncToPDF);
+    } else if ([itemIdentifier isEqualToString:@"ExportPDF"]) {
+        item.label = @"导出 PDF";
+        item.paletteLabel = @"导出 PDF";
+        item.toolTip = @"把编译好的 PDF 另存到指定位置 (⇧⌘E)";
+        item.image = [NSImage imageWithSystemSymbolName:@"square.and.arrow.up" accessibilityDescription:@"Export PDF"];
+        item.target = self;
+        item.action = @selector(exportPDFToolbarAction:);
     } else if ([itemIdentifier isEqualToString:@"CleanAux"]) {
         item.label = @"清理";
         item.paletteLabel = @"清理缓存文件";
@@ -1039,6 +1037,17 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 - (void)cleanAuxFilesAction:(id)sender {
     [self.documentModel cleanAuxiliaryFiles];
     [self.statusBar showReadyState];
+}
+
+- (void)exportPDFToolbarAction:(id)sender {
+    [self exportPDF];
+}
+
+- (BOOL)validateToolbarItem:(NSToolbarItem *)item {
+    if (item.action == @selector(exportPDFToolbarAction:)) {
+        return self.currentPDFURL != nil;
+    }
+    return YES;
 }
 
 @end

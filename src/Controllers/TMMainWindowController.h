@@ -6,6 +6,9 @@ NS_ASSUME_NONNULL_BEGIN
 @interface TMMainWindowController : NSWindowController <NSWindowDelegate>
 
 @property (nonatomic, strong) TMDocument *documentModel;
+/// 最近一次编译成功（或打开文档时已存在）的 PDF。使用 `% !TEX root` 时指向主文件的 PDF，
+/// 与 documentModel.expectedPDFURL 可能不同；导出 / 显示 / 打印都应以此为准。
+@property (nonatomic, strong, readonly, nullable) NSURL *currentPDFURL;
 
 - (instancetype)initWithDocument:(TMDocument *)document;
 - (void)newDocumentAction:(nullable id)sender;
@@ -13,6 +16,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)compileCurrentDocument;
 - (void)cancelCompilation;
 - (BOOL)isCompiling;
+/// 弹出存储面板，把 currentPDFURL 复制到用户选定位置。返回 YES 表示已导出。
+- (BOOL)exportPDF;
+/// 在访达中选中 currentPDFURL。
+- (void)revealPDFInFinder;
 /// 停止输入 1.5 秒后自动保存并编译；持久化到 NSUserDefaults(TMAutoCompile)。
 @property (nonatomic, assign) BOOL autoCompileEnabled;
 /// 返回 YES 表示保存成功（或已是最新）。未命名 / 暂存文档会弹出存储面板。
