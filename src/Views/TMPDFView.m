@@ -70,7 +70,8 @@
 }
 
 - (void)mouseDown:(NSEvent *)event {
-    if (event.modifierFlags & NSEventModifierFlagCommand) {
+    BOOL wantsInverseSearch = (event.modifierFlags & NSEventModifierFlagCommand) || event.clickCount == 2;
+    if (wantsInverseSearch) {
         NSPoint locationInView = [self convertPoint:event.locationInWindow fromView:nil];
         PDFPage *page = [self pageForPoint:locationInView nearest:YES];
         if (page && self.document) {
@@ -83,7 +84,7 @@
                                                               pageIndex:pageIndex
                                                              pageBounds:bounds];
             }
-            return;
+            return; // 双击不再交给 PDFKit 选词
         }
     }
 

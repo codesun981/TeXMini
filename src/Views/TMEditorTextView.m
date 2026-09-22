@@ -446,9 +446,28 @@ static unichar TMMatchingBracket(unichar c) {
 
     if (targetLocation <= text.length) {
         [self setSelectedRange:NSMakeRange(targetLocation, targetLength)];
-        [self scrollRangeToVisible:NSMakeRange(targetLocation, targetLength)];
+        [self scrollLocationToCenter:targetLocation];
         [self showFindIndicatorForRange:NSMakeRange(targetLocation, targetLength > 0 ? targetLength : 1)];
     }
+}
+
+/// 把 location 所在行滚到编辑器视口垂直居中（与 PDF 端的定位行为对称）。
+- (void)scrollLocationToCenter:(NSUInteger)location {
+    NSScrollView *scrollView = self.enclosingScrollView;
+    if (!scrollView) {
+        [self scrollRangeToVisible:NSMakeRange(location, 0)];
+        return;
+    }
+    NSUInteger glyph = [self.layoutManager glyphIndexForCharacterAtIndex:MIN(location, self.string.length)];
+    NSRect lineRect = [self.layoutManager lineFragmentRectForGlyphAtIndex:glyph effectiveRange:NULL];
+    lineRect.origin.y += self.textContainerInset.height;
+
+    NSClipView *clip = scrollView.contentView;
+    NSRect visible = clip.bounds;
+    CGFloat y = NSMidY(lineRect) - NSHeight(visible) / 2.0;
+    y = MAX(0, MIN(y, NSHeight(self.bounds) - NSHeight(visible)));
+    [clip scrollToPoint:NSMakePoint(visible.origin.x, y)];
+    [scrollView reflectScrolledClipView:clip];
 }
 
 @end
