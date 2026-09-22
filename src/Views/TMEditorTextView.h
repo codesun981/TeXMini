@@ -6,6 +6,8 @@ NS_ASSUME_NONNULL_BEGIN
 @protocol TMEditorTextViewDelegate <NSTextViewDelegate>
 @optional
 - (void)editorTextViewDidChangeCursorPositionToLine:(NSInteger)line column:(NSInteger)column;
+/// 用户在编辑器里 ⌘+点击（与 PDF 里 ⌘+点击对称）：请求正向同步到 PDF。
+- (void)editorTextViewDidRequestForwardSync;
 @end
 
 @interface TMEditorTextView : NSTextView

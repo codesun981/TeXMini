@@ -96,40 +96,51 @@
     PDFPage *page = [self.document pageAtIndex:pageIndex];
     if (!page) return;
 
-    [self goToPage:page];
-
-    NSRect viewRect = [self convertRect:pageRect fromPage:page];
-
-    // 扩大一点点边缘，更清晰
-    viewRect = NSInsetRect(viewRect, -4, -2);
+    // 先让 PDFKit 把目标区域滚到视野内（跨页、缩放都由它处理），再在下一轮 runloop 布局完成后画高亮，
+    // 否则 convertRect:fromPage: 拿到的是滚动前的坐标。
+    NSRect scrollTarget = NSInsetRect(pageRect, 0, -60);
+    [self goToRect:scrollTarget onPage:page];
 
     if (_currentOverlay) {
         [_currentOverlay removeFromSuperview];
         _currentOverlay = nil;
     }
 
-    TMHighlightOverlayView *overlay = [[TMHighlightOverlayView alloc] initWithFrame:viewRect];
-    overlay.wantsLayer = YES;
-    overlay.alphaValue = 1.0;
-    [self addSubview:overlay];
-    _currentOverlay = overlay;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSRect viewRect = NSInsetRect([self convertRect:pageRect fromPage:page], -4, -2);
+        TMHighlightOverlayView *overlay = [[TMHighlightOverlayView alloc] initWithFrame:viewRect];
+        overlay.wantsLayer = YES;
+        overlay.alphaValue = 1.0;
+        [self addSubview:overlay];
+        self->_currentOverlay = overlay;
 
-    // 滚动至可见
-    [self scrollRectToVisible:viewRect];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (self->_currentOverlay == overlay) {
-            [NSAnimationContext runAnimationGroup:^(NSAnimationContext * _Nonnull context) {
-                context.duration = 0.5;
-                overlay.animator.alphaValue = 0.0;
-            } completionHandler:^{
-                [overlay removeFromSuperview];
-                if (self->_currentOverlay == overlay) {
-                    self->_currentOverlay = nil;
-                }
-            }];
-        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (self->_currentOverlay == overlay) {
+                [NSAnimationContext runAnimationGroup:^(NSAnimationContext * _Nonnull context) {
+                    context.duration = 0.5;
+                    overlay.animator.alphaValue = 0.0;
+                } completionHandler:^{
+                    [overlay removeFromSuperview];
+                    if (self->_currentOverlay == overlay) {
+                        self->_currentOverlay = nil;
+                    }
+                }];
+            }
+        });
     });
+}
+
+/// 滚动或缩放后叠加层位置就不对了，直接撤掉，避免高亮飘在错误的地方。
+- (void)scrollWheel:(NSEvent *)event {
+    [self removeOverlayIfAny];
+    [super scrollWheel:event];
+}
+
+- (void)removeOverlayIfAny {
+    if (_currentOverlay) {
+        [_currentOverlay removeFromSuperview];
+        _currentOverlay = nil;
+    }
 }
 
 @end

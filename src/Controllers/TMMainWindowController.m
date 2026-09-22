@@ -820,7 +820,11 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 #pragma mark - SyncTeX 双向同步
 
 - (void)forwardSyncToPDF {
-    if (!self.documentModel.fileURL || !self.currentPDFURL) return;
+    if (!self.documentModel.fileURL) return;
+    if (!self.currentPDFURL || !self.pdfView.document) {
+        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘B 编译"];
+        return;
+    }
 
     NSString *src = self.documentModel.fileURL.path;
     NSString *pdf = self.currentPDFURL.path;
@@ -832,7 +836,17 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
                                                pdfView:self.pdfView];
     if (res) {
         [self.pdfView flashHighlightRect:res.targetRect onPageAtIndex:res.pageIndex];
+    } else {
+        NSString *syncFile = [self.currentPDFURL.URLByDeletingPathExtension URLByAppendingPathExtension:@"synctex.gz"].path;
+        BOOL hasSync = [[NSFileManager defaultManager] fileExistsAtPath:syncFile];
+        [self.statusBar showInfoMessage:hasSync
+            ? [NSString stringWithFormat:@"第 %ld 行在 PDF 中没有对应位置（可能是注释或导言区）", (long)self.currentCursorLine]
+            : @"缺少 .synctex.gz，重新编译一次即可启用同步"];
     }
+}
+
+- (void)editorTextViewDidRequestForwardSync {
+    [self forwardSyncToPDF];
 }
 
 - (void)pdfViewDidRequestInverseSearchAtPoint:(NSPoint)pointOnPage pageIndex:(NSInteger)pageIndex pageBounds:(NSRect)pageBounds {
@@ -1148,7 +1162,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     } else if ([itemIdentifier isEqualToString:@"ForwardSync"]) {
         item.label = @"同步 (⌘J)";
         item.paletteLabel = @"正向跳转至 PDF";
-        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J)";
+        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J 或在代码中 ⌘+点击)";
         item.image = [NSImage imageWithSystemSymbolName:@"arrow.right.circle" accessibilityDescription:@"Sync to PDF"];
         item.target = self;
         item.action = @selector(forwardSyncToPDF);

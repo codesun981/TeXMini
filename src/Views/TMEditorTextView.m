@@ -368,6 +368,20 @@ static unichar TMMatchingBracket(unichar c) {
     [self outdentSelection:sender];
 }
 
+- (void)mouseDown:(NSEvent *)event {
+    if ((event.modifierFlags & NSEventModifierFlagCommand) && event.clickCount == 1) {
+        // 先把光标放到点击处，再让控制器按新光标行做正向同步
+        NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+        NSUInteger idx = [self characterIndexForInsertionAtPoint:p];
+        [self setSelectedRange:NSMakeRange(MIN(idx, self.string.length), 0)];
+        if ([self.editorDelegate respondsToSelector:@selector(editorTextViewDidRequestForwardSync)]) {
+            [self.editorDelegate editorTextViewDidRequestForwardSync];
+        }
+        return;
+    }
+    [super mouseDown:event];
+}
+
 #pragma mark - 光标行列位置更新
 
 - (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges affinity:(NSSelectionAffinity)affinity stillSelecting:(BOOL)stillSelecting {

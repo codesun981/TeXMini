@@ -13,6 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface TMSyncTeX : NSObject
 
+/// 源码行 → PDF 位置。找不到该行时库会自动向前后就近查找；结果矩形为该行所有盒子的并集（PDF 页坐标，原点左下）。
 + (nullable TMSyncTeXResult *)forwardSearchLine:(NSInteger)line
                                          column:(NSInteger)column
                                      sourceFile:(NSString *)sourceFilePath
@@ -23,6 +24,9 @@ NS_ASSUME_NONNULL_BEGIN
                                        pageIndex:(NSInteger)pageIndex
                                       pageBounds:(NSRect)pageBounds
                                          pdfPath:(NSString *)pdfPath;
+
+/// 释放缓存的 synctex scanner（正常情况下按 .synctex.gz 修改时间自动失效，无需手动调用）。
++ (void)invalidateCache;
 
 @end
 

@@ -49,7 +49,7 @@
 @"\\section{操作提示}\n"
 @"1. 按 \\textbf{⌘B} 一键保存并自动编译，右侧即可获得高清 PDF 预览；\n"
 @"2. 在右侧 PDF 任意位置 \\textbf{⌘+鼠标点击}，左侧源码将瞬间跳转至对应代码行；\n"
-@"3. 在左侧光标处按 \\textbf{⌘J}，右侧 PDF 对应段落将闪烁定位高亮。\n\n"
+@"3. 在左侧代码任意位置 \\textbf{⌘+鼠标点击}（或按 \\textbf{⌘J}），右侧 PDF 对应段落将闪烁定位高亮。\n\n"
 @"\\end{document}\n";
     doc.isDirty = NO;
     return doc;
