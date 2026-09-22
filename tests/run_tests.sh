@@ -10,7 +10,24 @@ clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     -Isrc/Services \
     src/Models/TMDocument.m \
     src/Services/TMEditActions.m \
+    src/Services/TMMagicComments.m \
+    src/Services/TMLogParser.m \
     tests/TMTests.m \
     -o build/tmtests
 
 build/tmtests
+
+# 集成测试：需要 MacTeX（latexmk）。没有就跳过。
+if [ -x /Library/TeX/texbin/latexmk ] || command -v latexmk >/dev/null 2>&1; then
+    clang -fobjc-arc -O0 -g \
+        -framework Foundation \
+        -Isrc/Services \
+        src/Services/TMCompiler.m \
+        src/Services/TMMagicComments.m \
+        src/Services/TMLogParser.m \
+        tests/TMCompileIntegration.m \
+        -o build/tmintegration
+    build/tmintegration
+else
+    echo "integration: skipped (latexmk not found)"
+fi

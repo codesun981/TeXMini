@@ -1,5 +1,6 @@
 #import "AppDelegate.h"
 #import "TMDocument.h"
+#import "TMCompiler.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 @implementation AppDelegate
@@ -14,6 +15,7 @@
     [self.mainWindowController showWindow:nil];
     [self.mainWindowController.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    [self checkMacTeXInstallation];
 }
 
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
@@ -109,6 +111,9 @@
     NSMenuItem *compileMenuItem = [[NSMenuItem alloc] init];
     NSMenu *compileMenu = [[NSMenu alloc] initWithTitle:@"编译"];
     [compileMenu addItemWithTitle:@"保存并编译" action:@selector(compileDocumentAction:) keyEquivalent:@"b"];
+    [compileMenu addItemWithTitle:@"取消编译" action:@selector(cancelCompileAction:) keyEquivalent:@"."];
+    [compileMenu addItemWithTitle:@"自动编译（停止输入后）" action:@selector(toggleAutoCompileAction:) keyEquivalent:@""];
+    [compileMenu addItem:[NSMenuItem separatorItem]];
     [compileMenu addItemWithTitle:@"正向跳转至 PDF" action:@selector(forwardSyncAction:) keyEquivalent:@"j"];
     [compileMenu addItem:[NSMenuItem separatorItem]];
     [compileMenu addItemWithTitle:@"清理辅助文件" action:@selector(cleanAuxAction:) keyEquivalent:@"k"];
@@ -187,6 +192,45 @@
 
 - (void)compileDocumentAction:(id)sender {
     [self.mainWindowController compileCurrentDocument];
+}
+
+- (void)cancelCompileAction:(id)sender {
+    [self.mainWindowController cancelCompilation];
+}
+
+- (void)toggleAutoCompileAction:(id)sender {
+    self.mainWindowController.autoCompileEnabled = !self.mainWindowController.autoCompileEnabled;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    SEL action = menuItem.action;
+    if (action == @selector(cancelCompileAction:)) {
+        return [self.mainWindowController isCompiling];
+    }
+    if (action == @selector(toggleAutoCompileAction:)) {
+        menuItem.state = self.mainWindowController.autoCompileEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    if (action == @selector(exportPDFAction:)) {
+        NSURL *pdfURL = self.mainWindowController.documentModel.expectedPDFURL;
+        return pdfURL && [[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path];
+    }
+    return YES;
+}
+
+- (void)checkMacTeXInstallation {
+    if ([TMCompiler isMacTeXInstalled]) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"未检测到 LaTeX 发行版";
+    alert.informativeText = @"TeXMini 需要 MacTeX（或 BasicTeX）提供 latexmk / pdflatex / xelatex。\n"
+                            @"已查找：/Library/TeX/texbin、/usr/local/bin、/opt/homebrew/bin。\n\n"
+                            @"安装完成后重新启动 TeXMini 即可编译。";
+    [alert addButtonWithTitle:@"前往下载 MacTeX"];
+    [alert addButtonWithTitle:@"稍后"];
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://tug.org/mactex/"]];
+    }
 }
 
 - (void)forwardSyncAction:(id)sender {

@@ -66,7 +66,7 @@
     _enginePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _enginePopup.bezelStyle = NSBezelStyleInline;
     _enginePopup.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
-    [_enginePopup addItemsWithTitles:@[@"latexmk", @"xelatex", @"pdflatex"]];
+    [_enginePopup addItemsWithTitles:@[@"自动 (latexmk)", @"xelatex", @"pdflatex"]];
     _enginePopup.target = self;
     _enginePopup.action = @selector(engineChanged:);
     _enginePopup.translatesAutoresizingMaskIntoConstraints = NO;
@@ -124,10 +124,13 @@
     _errorButton.hidden = YES;
 }
 
-- (void)showSuccessStateWithDuration:(double)duration {
+- (void)showSuccessStateWithDuration:(double)duration warnings:(NSUInteger)warnings badBoxes:(NSUInteger)badBoxes {
     [_spinner stopAnimation:nil];
-    _statusLabel.stringValue = [NSString stringWithFormat:@"✓ 编译完成 (%.2fs)", duration];
-    _statusLabel.textColor = [NSColor systemGreenColor];
+    NSMutableString *text = [NSMutableString stringWithFormat:@"✓ 编译完成 (%.2fs)", duration];
+    if (warnings > 0) [text appendFormat:@" · %lu 警告", (unsigned long)warnings];
+    if (badBoxes > 0) [text appendFormat:@" · %lu 坏盒子", (unsigned long)badBoxes];
+    _statusLabel.stringValue = text;
+    _statusLabel.textColor = warnings > 0 ? [NSColor systemOrangeColor] : [NSColor systemGreenColor];
     _errorButton.hidden = YES;
 }
 

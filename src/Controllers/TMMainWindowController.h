@@ -11,6 +11,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)newDocumentAction:(nullable id)sender;
 - (void)openDocumentAtURL:(NSURL *)url;
 - (void)compileCurrentDocument;
+- (void)cancelCompilation;
+- (BOOL)isCompiling;
+/// 停止输入 1.5 秒后自动保存并编译；持久化到 NSUserDefaults(TMAutoCompile)。
+@property (nonatomic, assign) BOOL autoCompileEnabled;
 /// 返回 YES 表示保存成功（或已是最新）。未命名 / 暂存文档会弹出存储面板。
 - (BOOL)saveCurrentDocument;
 - (BOOL)saveDocumentAs;

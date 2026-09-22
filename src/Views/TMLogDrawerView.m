@@ -46,10 +46,29 @@
 }
 
 - (void)appendLogText:(NSString *)text {
-    NSAttributedString *attr = [[NSAttributedString alloc] initWithString:text attributes:@{
-        NSFontAttributeName: [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular],
-        NSForegroundColorAttributeName: [NSColor labelColor]
+    NSFont *font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] init];
+
+    // 逐行着色：错误红、警告橙、坏盒子黄，其余默认色。
+    // 注意流式输出的 chunk 可能在行中间截断，只按前缀判断，误差可接受。
+    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
+    [lines enumerateObjectsUsingBlock:^(NSString *line, NSUInteger idx, BOOL *stop) {
+        NSColor *color = [NSColor labelColor];
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if ([trimmed hasPrefix:@"! "] || [trimmed rangeOfString:@".tex:[0-9]+:" options:NSRegularExpressionSearch].location != NSNotFound) {
+            color = [NSColor systemRedColor];
+        } else if ([trimmed containsString:@"Warning:"]) {
+            color = [NSColor systemOrangeColor];
+        } else if ([trimmed hasPrefix:@"Overfull"] || [trimmed hasPrefix:@"Underfull"]) {
+            color = [NSColor systemYellowColor];
+        }
+        NSString *piece = idx < lines.count - 1 ? [line stringByAppendingString:@"\n"] : line;
+        [attr appendAttributedString:[[NSAttributedString alloc] initWithString:piece attributes:@{
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: color
+        }]];
     }];
+
     [_textView.textStorage appendAttributedString:attr];
     [_textView scrollRangeToVisible:NSMakeRange(_textView.textStorage.length, 0)];
 }

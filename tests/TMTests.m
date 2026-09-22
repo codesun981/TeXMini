@@ -3,6 +3,8 @@
 #import <Foundation/Foundation.h>
 #import "TMDocument.h"
 #import "TMEditActions.h"
+#import "TMMagicComments.h"
+#import "TMLogParser.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -23,7 +25,7 @@ static void tm_register(const char *name, TMTestFn fn) {
 #define TM_ASSERT_TRUE(x) do { if (!(x)) TM_FAIL("expected true: %s", #x); } while (0)
 #define TM_ASSERT_NIL(x) do { if ((x) != nil) TM_FAIL("expected nil: %s", #x); } while (0)
 #define TM_ASSERT_EQ_INT(a, b) do { long _a = (long)(a), _b = (long)(b); if (_a != _b) TM_FAIL("%s == %ld, expected %ld", #a, _a, _b); } while (0)
-#define TM_ASSERT_EQ_STR(a, b) do { NSString *_a = (a), *_b = (b); if (!((_a == nil && _b == nil) || [_a isEqualToString:_b])) TM_FAIL("%s == %@, expected %@", #a, [_a description], [_b description]); } while (0)
+#define TM_ASSERT_EQ_STR(a, b) do { NSString *_a = (a), *_b = (b); if (!((_a == nil && _b == nil) || [_a isEqualToString:_b])) TM_FAIL("%s == \"%s\", expected \"%s\"", #a, _a ? [_a UTF8String] : "(nil)", _b ? [_b UTF8String] : "(nil)"); } while (0)
 
 #pragma mark - TMDocument
 
@@ -99,6 +101,82 @@ TM_TEST(test_environment_to_close) {
 TM_TEST(test_leading_whitespace) {
     TM_ASSERT_EQ_STR([TMEditActions leadingWhitespaceOfLine:@"  \t x"], @"  \t ");
     TM_ASSERT_EQ_STR([TMEditActions leadingWhitespaceOfLine:@"x"], @"");
+}
+
+#pragma mark - TMMagicComments
+
+TM_TEST(test_magic_comments_program_and_root) {
+    NSDictionary *m = [TMMagicComments magicCommentsInString:@"% !TEX program = xelatex\n%!TEX root=../main.tex\n\\documentclass{article}"];
+    TM_ASSERT_EQ_STR(m[@"program"], @"xelatex");
+    TM_ASSERT_EQ_STR(m[@"root"], @"../main.tex");
+}
+
+TM_TEST(test_magic_comments_case_insensitive_and_tolerant_spacing) {
+    NSDictionary *m = [TMMagicComments magicCommentsInString:@"%  !tex  PROGRAM  =  PdfLaTeX  \n"];
+    TM_ASSERT_EQ_STR(m[@"program"], @"PdfLaTeX");
+}
+
+TM_TEST(test_magic_comments_ignored_after_30_lines) {
+    NSMutableString *s = [NSMutableString string];
+    for (int i = 0; i < 31; i++) [s appendString:@"% filler\n"];
+    [s appendString:@"% !TEX program = xelatex\n"];
+    TM_ASSERT_NIL([TMMagicComments magicCommentsInString:s][@"program"]);
+}
+
+TM_TEST(test_root_file_url_resolves_relative_to_document) {
+    NSURL *doc = [NSURL fileURLWithPath:@"/tmp/proj/chapters/ch1.tex"];
+    NSURL *root = [TMMagicComments rootFileURLForDocumentURL:doc content:@"% !TEX root = ../main.tex\n"];
+    TM_ASSERT_EQ_STR(root.path, @"/tmp/proj/main.tex");
+    TM_ASSERT_NIL([TMMagicComments rootFileURLForDocumentURL:doc content:@"no magic here"]);
+}
+
+#pragma mark - TMLogParser
+
+TM_TEST(test_log_parser_error_with_line) {
+    NSString *log = @"! Undefined control sequence.\nl.12 \\foo\n             bar\n";
+    NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:log];
+    TM_ASSERT_EQ_INT(issues.count, 1);
+    TM_ASSERT_EQ_INT(issues[0].kind, TMLogIssueError);
+    TM_ASSERT_EQ_STR(issues[0].message, @"Undefined control sequence.");
+    TM_ASSERT_EQ_INT(issues[0].line, 12);
+}
+
+TM_TEST(test_log_parser_warnings_and_bad_boxes) {
+    NSString *log =
+        @"LaTeX Warning: Reference `fig:x' on page 1 undefined on input line 7.\n"
+        @"Overfull \\hbox (12.3pt too wide) in paragraph at lines 20--21\n"
+        @"Package hyperref Warning: Token not allowed in a PDF string on input line 3.\n"
+        @"Underfull \\vbox (badness 10000) has occurred while \\output is active\n";
+    NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:log];
+    TM_ASSERT_EQ_INT(issues.count, 4);
+    TM_ASSERT_EQ_INT(issues[0].kind, TMLogIssueWarning);
+    TM_ASSERT_EQ_INT(issues[0].line, 7);
+    TM_ASSERT_EQ_INT(issues[1].kind, TMLogIssueBadBox);
+    TM_ASSERT_EQ_INT(issues[1].line, 20);
+    TM_ASSERT_EQ_INT(issues[2].kind, TMLogIssueWarning);
+    TM_ASSERT_EQ_INT(issues[2].line, 3);
+    TM_ASSERT_EQ_INT(issues[3].kind, TMLogIssueBadBox);
+    TM_ASSERT_EQ_INT(issues[3].line, 0);
+}
+
+TM_TEST(test_log_parser_first_error_helper) {
+    NSString *log = @"LaTeX Warning: x\n! Missing $ inserted.\n<inserted text>\nl.5 a_b\n! Second error.\nl.9\n";
+    NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:log];
+    TMLogIssue *first = [TMLogParser firstErrorInIssues:issues];
+    TM_ASSERT_EQ_STR(first.message, @"Missing $ inserted.");
+    TM_ASSERT_EQ_INT(first.line, 5);
+    TM_ASSERT_EQ_INT([TMLogParser countOfKind:TMLogIssueError inIssues:issues], 2);
+    TM_ASSERT_EQ_INT([TMLogParser countOfKind:TMLogIssueWarning inIssues:issues], 1);
+}
+
+TM_TEST(test_log_parser_file_line_error_format) {
+    NSString *log = @"./sample/test.tex:15: Undefined control sequence.\nl.15 \\foo\n\n./sample/test.tex:20: Missing $ inserted.\n";
+    NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:log];
+    TM_ASSERT_EQ_INT(issues.count, 2);
+    TM_ASSERT_EQ_INT(issues[0].kind, TMLogIssueError);
+    TM_ASSERT_EQ_INT(issues[0].line, 15);
+    TM_ASSERT_EQ_STR(issues[0].message, @"Undefined control sequence.");
+    TM_ASSERT_EQ_INT(issues[1].line, 20);
 }
 
 #pragma mark - Runner

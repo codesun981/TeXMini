@@ -31,6 +31,8 @@ clang -fobjc-arc -O2 \
     src/Services/TMSyncTeX.m \
     src/Services/TMOutlineParser.m \
     src/Services/TMEditActions.m \
+    src/Services/TMMagicComments.m \
+    src/Services/TMLogParser.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
     src/Views/TMEditorTextView.m \

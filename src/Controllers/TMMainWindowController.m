@@ -26,6 +26,8 @@
 @property (nonatomic, assign) NSInteger currentCursorLine;
 @property (nonatomic, assign) NSInteger currentCursorCol;
 @property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
+@property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
+@property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, assign) CGFloat lastOutlineWidth;
 @property (nonatomic, assign) BOOL isOutlineCollapsed;
 
@@ -55,6 +57,7 @@
         _currentCursorCol = 1;
         _lastOutlineWidth = 220.0;
         _isOutlineCollapsed = NO;
+        _autoCompileEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"TMAutoCompile"];
         window.delegate = self;
 
         [self setupUI];
@@ -479,10 +482,66 @@
     [[TMCompiler sharedCompiler] compileFileAtURL:self.documentModel.fileURL];
 }
 
+- (void)cancelCompilation {
+    [[TMCompiler sharedCompiler] cancelCompilation];
+}
+
+- (BOOL)isCompiling {
+    return [TMCompiler sharedCompiler].isCompiling;
+}
+
+#pragma mark - 自动编译
+
+- (void)setAutoCompileEnabled:(BOOL)enabled {
+    _autoCompileEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"TMAutoCompile"];
+    if (!enabled) {
+        [self.autoCompileTimer invalidate];
+        self.autoCompileTimer = nil;
+    }
+}
+
+- (void)scheduleAutoCompile {
+    if (!self.autoCompileEnabled) return;
+    [self.autoCompileTimer invalidate];
+    self.autoCompileTimer = [NSTimer scheduledTimerWithTimeInterval:1.5
+                                                             target:self
+                                                           selector:@selector(autoCompileTimerFired)
+                                                           userInfo:nil
+                                                            repeats:NO];
+}
+
+- (void)autoCompileTimerFired {
+    self.autoCompileTimer = nil;
+    if (!self.autoCompileEnabled) return;
+    if ([self isCompiling]) {
+        // 正在编译，等结束后补一次
+        self.needsCompileAfterCurrent = YES;
+        return;
+    }
+    [self compileCurrentDocument];
+}
+
+- (void)runPendingAutoCompileIfNeeded {
+    if (self.needsCompileAfterCurrent && self.autoCompileEnabled) {
+        self.needsCompileAfterCurrent = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self compileCurrentDocument];
+        });
+    } else {
+        self.needsCompileAfterCurrent = NO;
+    }
+}
+
 - (void)compilerDidStartCompilingDocument:(NSURL *)fileURL {
-    NSString *engineName = @"latexmk";
-    if ([TMCompiler sharedCompiler].engine == TMTeXEngineXeLaTeX) engineName = @"xelatex";
-    if ([TMCompiler sharedCompiler].engine == TMTeXEnginePDFLaTeX) engineName = @"pdflatex";
+    NSString *content = [NSString stringWithContentsOfURL:fileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
+    NSString *engineName = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content];
+    if ([TMCompiler findExecutableNamed:@"latexmk"]) {
+        engineName = [NSString stringWithFormat:@"latexmk · %@", engineName];
+    }
+    if (![fileURL isEqual:self.documentModel.fileURL]) {
+        engineName = [NSString stringWithFormat:@"%@ · 主文件 %@", engineName, fileURL.lastPathComponent];
+    }
     [self.statusBar showCompilingStateWithEngine:engineName];
 }
 
@@ -490,17 +549,26 @@
     [self.logDrawer appendLogText:text];
 }
 
-- (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL {
-    [self.statusBar showSuccessStateWithDuration:durationSeconds];
+- (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL issues:(NSArray<TMLogIssue *> *)issues {
+    NSUInteger warnings = [TMLogParser countOfKind:TMLogIssueWarning inIssues:issues];
+    NSUInteger badBoxes = [TMLogParser countOfKind:TMLogIssueBadBox inIssues:issues];
+    [self.statusBar showSuccessStateWithDuration:durationSeconds warnings:warnings badBoxes:badBoxes];
     self.pdfPlaceholderView.hidden = YES;
     [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
+    [self runPendingAutoCompileIfNeeded];
 }
 
-- (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log {
+- (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log issues:(NSArray<TMLogIssue *> *)issues {
     [self.statusBar showErrorStateWithMessage:summary line:lineNumber];
     if (!self.logDrawer.isExpanded) {
         [self.logDrawer toggleAnimated];
     }
+    [self runPendingAutoCompileIfNeeded];
+}
+
+- (void)compilerDidCancel {
+    [self.statusBar showInfoMessage:@"已取消编译"];
+    [self runPendingAutoCompileIfNeeded];
 }
 
 #pragma mark - SyncTeX 双向同步
@@ -557,6 +625,7 @@
         self.window.documentEdited = YES;
     }
     [self scheduleOutlineUpdateImmediate:NO];
+    [self scheduleAutoCompile];
 }
 
 - (void)editorTextViewDidChangeCursorPositionToLine:(NSInteger)line column:(NSInteger)column {
