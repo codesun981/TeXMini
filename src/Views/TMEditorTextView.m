@@ -14,7 +14,7 @@ static NSString *const kTMIndentUnit = @"  ";
     self.automaticSpellingCorrectionEnabled = NO;
     self.usesFindBar = YES;
     self.incrementalSearchingEnabled = YES;
-    self.font = [NSFont fontWithName:@"Menlo" size:13.5] ?: [NSFont monospacedSystemFontOfSize:13.5 weight:NSFontWeightRegular];
+    self.font = [TMLaTeXHighlighter baseFont];
     self.textColor = [NSColor textColor];
     self.backgroundColor = [NSColor textBackgroundColor];
     self.insertionPointColor = [NSColor controlAccentColor];
@@ -35,6 +35,82 @@ static NSString *const kTMIndentUnit = @"  ";
 - (void)rehighlightAll {
     if (self.textStorage.length > 0) {
         [TMLaTeXHighlighter highlightTextStorage:self.textStorage inRange:NSMakeRange(0, self.textStorage.length)];
+    }
+}
+
+- (void)setEditorFontSize:(CGFloat)size {
+    size = MAX(9.0, MIN(30.0, size));
+    [TMLaTeXHighlighter setBaseFontSize:size];
+    self.font = [TMLaTeXHighlighter baseFont];
+    [self rehighlightAll];
+    [self.enclosingScrollView.verticalRulerView setNeedsDisplay:YES];
+}
+
+- (CGFloat)editorFontSize {
+    return [TMLaTeXHighlighter baseFontSize];
+}
+
+#pragma mark - 括号匹配
+
+static BOOL TMIsOpenBracket(unichar c) { return c == '{' || c == '[' || c == '('; }
+static BOOL TMIsCloseBracket(unichar c) { return c == '}' || c == ']' || c == ')'; }
+static unichar TMMatchingBracket(unichar c) {
+    switch (c) {
+        case '{': return '}'; case '}': return '{';
+        case '[': return ']'; case ']': return '[';
+        case '(': return ')'; case ')': return '(';
+        default: return 0;
+    }
+}
+
+/// 从 index 处的括号出发寻找配对括号，跳过被反斜杠转义的括号。找不到返回 NSNotFound。
+- (NSUInteger)matchingBracketIndexForIndex:(NSUInteger)index {
+    NSString *text = self.string;
+    if (index >= text.length) return NSNotFound;
+    unichar c = [text characterAtIndex:index];
+    unichar partner = TMMatchingBracket(c);
+    if (partner == 0) return NSNotFound;
+
+    const NSUInteger limit = 20000;
+    NSInteger depth = 0;
+    if (TMIsOpenBracket(c)) {
+        NSUInteger end = MIN(text.length, index + limit);
+        for (NSUInteger i = index; i < end; i++) {
+            unichar ch = [text characterAtIndex:i];
+            if (i > 0 && [text characterAtIndex:i - 1] == '\\') continue;
+            if (ch == c) depth++;
+            else if (ch == partner && --depth == 0) return i;
+        }
+    } else {
+        NSUInteger start = index > limit ? index - limit : 0;
+        for (NSInteger i = (NSInteger)index; i >= (NSInteger)start; i--) {
+            unichar ch = [text characterAtIndex:(NSUInteger)i];
+            if (i > 0 && [text characterAtIndex:(NSUInteger)i - 1] == '\\') continue;
+            if (ch == c) depth++;
+            else if (ch == partner && --depth == 0) return (NSUInteger)i;
+        }
+    }
+    return NSNotFound;
+}
+
+- (void)flashMatchingBracketForCursorAt:(NSUInteger)loc {
+    NSString *text = self.string;
+    NSUInteger candidate = NSNotFound;
+    // 优先看光标左边的字符（刚输入完的闭合括号），其次看右边
+    if (loc > 0 && loc <= text.length) {
+        unichar left = [text characterAtIndex:loc - 1];
+        if (TMIsOpenBracket(left) || TMIsCloseBracket(left)) candidate = loc - 1;
+    }
+    if (candidate == NSNotFound && loc < text.length) {
+        unichar right = [text characterAtIndex:loc];
+        if (TMIsOpenBracket(right) || TMIsCloseBracket(right)) candidate = loc;
+    }
+    if (candidate == NSNotFound) return;
+    if (candidate > 0 && [text characterAtIndex:candidate - 1] == '\\') return;
+
+    NSUInteger match = [self matchingBracketIndexForIndex:candidate];
+    if (match != NSNotFound) {
+        [self showFindIndicatorForRange:NSMakeRange(match, 1)];
     }
 }
 
@@ -252,6 +328,10 @@ static NSString *const kTMIndentUnit = @"  ";
 
         if ([self.editorDelegate respondsToSelector:@selector(editorTextViewDidChangeCursorPositionToLine:column:)]) {
             [self.editorDelegate editorTextViewDidChangeCursorPositionToLine:line column:col];
+        }
+
+        if (sel.length == 0 && !stillSelecting) {
+            [self flashMatchingBracketForCursorAt:loc];
         }
     }
 }

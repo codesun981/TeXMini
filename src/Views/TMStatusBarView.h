@@ -14,7 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, weak) id<TMStatusBarViewDelegate> delegate;
 
-- (void)setCursorLine:(NSInteger)line column:(NSInteger)column totalChars:(NSUInteger)totalChars;
+- (void)setCursorLine:(NSInteger)line column:(NSInteger)column;
+/// 单独更新字数（由控制器在文本变化后去抖调用）。
+- (void)setWordCount:(NSUInteger)words;
 - (void)showCompilingStateWithEngine:(NSString *)engineName;
 - (void)showSuccessStateWithDuration:(double)duration;
 - (void)showErrorStateWithMessage:(NSString *)message line:(NSInteger)line;

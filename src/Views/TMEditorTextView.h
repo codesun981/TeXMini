@@ -15,6 +15,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)jumpToLine:(NSInteger)lineNumber column:(NSInteger)column;
 - (void)rehighlightAll;
 
+/// 编辑器字号（9–30），设置后立即重排并重新着色。
+@property (nonatomic, assign) CGFloat editorFontSize;
+
 /// 以下动作作用于选区覆盖的整行，可撤销。
 - (IBAction)toggleComment:(nullable id)sender;
 - (IBAction)indentSelection:(nullable id)sender;

@@ -24,6 +24,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)toggleOutlineSidebar;
 - (void)zoomIn;
 - (void)zoomOut;
+- (void)increaseEditorFontSize;
+- (void)decreaseEditorFontSize;
+- (void)resetEditorFontSize;
 
 @end
 

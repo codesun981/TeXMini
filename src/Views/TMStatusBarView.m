@@ -8,12 +8,17 @@
     NSButton *_logButton;
     NSPopUpButton *_enginePopup;
     NSInteger _lastErrorLine;
+    NSInteger _cursorLine;
+    NSInteger _cursorColumn;
+    NSUInteger _wordCount;
 }
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
         self.wantsLayer = YES;
+        _cursorLine = 1;
+        _cursorColumn = 1;
         [self setupUI];
     }
     return self;
@@ -96,8 +101,20 @@
     ]];
 }
 
-- (void)setCursorLine:(NSInteger)line column:(NSInteger)column totalChars:(NSUInteger)totalChars {
-    _cursorLabel.stringValue = [NSString stringWithFormat:@"行 %ld, 列 %ld  |  %lu 字符", (long)line, (long)column, (unsigned long)totalChars];
+- (void)setCursorLine:(NSInteger)line column:(NSInteger)column {
+    _cursorLine = line;
+    _cursorColumn = column;
+    [self refreshCursorLabel];
+}
+
+- (void)setWordCount:(NSUInteger)words {
+    _wordCount = words;
+    [self refreshCursorLabel];
+}
+
+- (void)refreshCursorLabel {
+    _cursorLabel.stringValue = [NSString stringWithFormat:@"行 %ld, 列 %ld  |  %lu 词",
+                                (long)_cursorLine, (long)_cursorColumn, (unsigned long)_wordCount];
 }
 
 - (void)showCompilingStateWithEngine:(NSString *)engineName {

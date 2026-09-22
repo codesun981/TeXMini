@@ -562,8 +562,33 @@
 - (void)editorTextViewDidChangeCursorPositionToLine:(NSInteger)line column:(NSInteger)column {
     self.currentCursorLine = line;
     self.currentCursorCol = column;
-    [self.statusBar setCursorLine:line column:column totalChars:self.editorTextView.string.length];
+    [self.statusBar setCursorLine:line column:column];
     [self.outlineSidebarView highlightItemForLineNumber:line];
+}
+
+- (void)updateWordCount {
+    NSString *text = self.editorTextView.string;
+    __block NSUInteger words = 0;
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                             options:NSStringEnumerationByWords | NSStringEnumerationSubstringNotRequired
+                          usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+        words++;
+    }];
+    [self.statusBar setWordCount:words];
+}
+
+#pragma mark - 编辑器字号
+
+- (void)increaseEditorFontSize {
+    self.editorTextView.editorFontSize = self.editorTextView.editorFontSize + 1.0;
+}
+
+- (void)decreaseEditorFontSize {
+    self.editorTextView.editorFontSize = self.editorTextView.editorFontSize - 1.0;
+}
+
+- (void)resetEditorFontSize {
+    self.editorTextView.editorFontSize = 13.5;
 }
 
 #pragma mark - TMStatusBarViewDelegate
@@ -602,6 +627,7 @@
     NSArray<TMOutlineItem *> *rootItems = [TMOutlineParser parseOutlineFromLaTeXString:content flatList:&flatList];
     [self.outlineSidebarView updateWithRootItems:rootItems flatItems:flatList];
     [self.outlineSidebarView highlightItemForLineNumber:self.currentCursorLine];
+    [self updateWordCount];
 }
 
 - (void)toggleOutlineSidebar {

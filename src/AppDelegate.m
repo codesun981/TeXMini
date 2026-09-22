@@ -123,6 +123,13 @@
     [viewMenu addItemWithTitle:@"放大" action:@selector(zoomInAction:) keyEquivalent:@"+"];
     [viewMenu addItemWithTitle:@"缩小" action:@selector(zoomOutAction:) keyEquivalent:@"-"];
     [viewMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *fontUp = [viewMenu addItemWithTitle:@"编辑器字体放大" action:@selector(editorFontUpAction:) keyEquivalent:@"="];
+    fontUp.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *fontDown = [viewMenu addItemWithTitle:@"编辑器字体缩小" action:@selector(editorFontDownAction:) keyEquivalent:@"-"];
+    fontDown.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *fontReset = [viewMenu addItemWithTitle:@"编辑器字体恢复默认" action:@selector(editorFontResetAction:) keyEquivalent:@"0"];
+    fontReset.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"切换日志抽屉" action:@selector(toggleLogAction:) keyEquivalent:@"L"];
     viewMenuItem.submenu = viewMenu;
     [mainMenu addItem:viewMenuItem];
@@ -204,6 +211,18 @@
 
 - (void)zoomOutAction:(id)sender {
     [self.mainWindowController zoomOut];
+}
+
+- (void)editorFontUpAction:(id)sender {
+    [self.mainWindowController increaseEditorFontSize];
+}
+
+- (void)editorFontDownAction:(id)sender {
+    [self.mainWindowController decreaseEditorFontSize];
+}
+
+- (void)editorFontResetAction:(id)sender {
+    [self.mainWindowController resetEditorFontSize];
 }
 
 - (void)exportPDFAction:(id)sender {
