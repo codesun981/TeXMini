@@ -17,14 +17,14 @@ clang -fobjc-arc -O2 \
     -framework PDFKit \
     -framework UniformTypeIdentifiers \
     -lz \
-    -ISources/CSynctex \
+    -Ivendor/synctex \
     -Isrc \
     -Isrc/Models \
     -Isrc/Services \
     -Isrc/Views \
     -Isrc/Controllers \
-    Sources/CSynctex/synctex_parser.c \
-    Sources/CSynctex/synctex_parser_utils.c \
+    vendor/synctex/synctex_parser.c \
+    vendor/synctex/synctex_parser_utils.c \
     src/Models/TMDocument.m \
     src/Models/TMOutlineItem.m \
     src/Services/TMCompiler.m \
