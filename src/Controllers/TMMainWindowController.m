@@ -983,6 +983,10 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     if (item) {
         [self.editorTextView jumpToLine:item.lineNumber column:1];
         [self.window makeFirstResponder:self.editorTextView];
+        // jumpToLine 已同步更新了 currentCursorLine，顺带把 PDF 也定位到该章节；没有 PDF 时静默跳过
+        if (self.currentPDFURL && self.pdfView.document) {
+            [self forwardSyncToPDF];
+        }
     }
 }
 
@@ -1162,7 +1166,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     } else if ([itemIdentifier isEqualToString:@"ForwardSync"]) {
         item.label = @"同步 (⌘J)";
         item.paletteLabel = @"正向跳转至 PDF";
-        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J 或在代码中 ⌘+点击)";
+        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J、双击或 ⌘+点击代码)";
         item.image = [NSImage imageWithSystemSymbolName:@"arrow.right.circle" accessibilityDescription:@"Sync to PDF"];
         item.target = self;
         item.action = @selector(forwardSyncToPDF);

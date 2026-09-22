@@ -380,6 +380,10 @@ static unichar TMMatchingBracket(unichar c) {
         return;
     }
     [super mouseDown:event];
+    // 双击：保留系统的选词行为，同时把 PDF 同步到这一行
+    if (event.clickCount == 2 && [self.editorDelegate respondsToSelector:@selector(editorTextViewDidRequestForwardSync)]) {
+        [self.editorDelegate editorTextViewDidRequestForwardSync];
+    }
 }
 
 #pragma mark - 光标行列位置更新
