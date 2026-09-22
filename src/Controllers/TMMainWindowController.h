@@ -28,6 +28,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)toggleOutlineSidebar;
 - (void)zoomIn;
 - (void)zoomOut;
+- (void)pdfNextPage;
+- (void)pdfPreviousPage;
+- (void)pdfFitWidth;
+- (void)pdfActualSize;
+- (BOOL)hasPDF;
+- (void)printPDF;
 - (void)increaseEditorFontSize;
 - (void)decreaseEditorFontSize;
 - (void)resetEditorFontSize;

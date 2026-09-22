@@ -3,6 +3,7 @@
 @implementation TMStatusBarView {
     NSTextField *_cursorLabel;
     NSTextField *_statusLabel;
+    NSTextField *_pageLabel;
     NSProgressIndicator *_spinner;
     NSButton *_errorButton;
     NSButton *_logButton;
@@ -78,6 +79,13 @@
     _logButton.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:_logButton];
 
+    _pageLabel = [NSTextField labelWithString:@""];
+    _pageLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _pageLabel.textColor = [NSColor secondaryLabelColor];
+    _pageLabel.hidden = YES;
+    _pageLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:_pageLabel];
+
     [NSLayoutConstraint activateConstraints:@[
         [_cursorLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
         [_cursorLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
@@ -97,8 +105,20 @@
         [_logButton.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
 
         [_enginePopup.trailingAnchor constraintEqualToAnchor:_logButton.leadingAnchor constant:-10],
-        [_enginePopup.centerYAnchor constraintEqualToAnchor:self.centerYAnchor]
+        [_enginePopup.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+
+        [_pageLabel.trailingAnchor constraintEqualToAnchor:_enginePopup.leadingAnchor constant:-14],
+        [_pageLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor]
     ]];
+}
+
+- (void)setPageIndex:(NSInteger)pageIndex pageCount:(NSInteger)pageCount {
+    if (pageCount <= 0) {
+        _pageLabel.hidden = YES;
+        return;
+    }
+    _pageLabel.hidden = NO;
+    _pageLabel.stringValue = [NSString stringWithFormat:@"第 %ld / %ld 页", (long)(pageIndex + 1), (long)pageCount];
 }
 
 - (void)setCursorLine:(NSInteger)line column:(NSInteger)column {

@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 显示一条中性提示（不带 spinner，不清除错误按钮之外的状态）。
 - (void)showInfoMessage:(NSString *)message;
 - (void)setSelectedEngine:(TMTeXEngine)engine;
+/// 页码指示（1-based 显示）。pageCount <= 0 时隐藏。
+- (void)setPageIndex:(NSInteger)pageIndex pageCount:(NSInteger)pageCount;
 
 @end
 

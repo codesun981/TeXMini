@@ -150,6 +150,9 @@
     _pdfView.syncDelegate = self;
     [_pdfContainerView addSubview:_pdfView];
 
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(pdfPageDidChange:) name:PDFViewPageChangedNotification object:_pdfView];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(pdfPageDidChange:) name:PDFViewDocumentChangedNotification object:_pdfView];
+
     // 占位视图 (当未编译出 PDF 时显示提示)
     [self setupPlaceholderView];
     [_pdfContainerView addSubview:_pdfPlaceholderView];
@@ -766,6 +769,48 @@
 
 - (void)zoomOut {
     [self.pdfView zoomOut:nil];
+}
+
+#pragma mark - PDF 导航与打印
+
+- (void)pdfPageDidChange:(NSNotification *)note {
+    PDFDocument *doc = self.pdfView.document;
+    if (!doc) {
+        [self.statusBar setPageIndex:0 pageCount:0];
+        return;
+    }
+    PDFPage *page = self.pdfView.currentPage;
+    NSInteger idx = page ? [doc indexForPage:page] : 0;
+    [self.statusBar setPageIndex:idx pageCount:(NSInteger)doc.pageCount];
+}
+
+- (void)pdfNextPage {
+    if (self.pdfView.canGoToNextPage) [self.pdfView goToNextPage:nil];
+}
+
+- (void)pdfPreviousPage {
+    if (self.pdfView.canGoToPreviousPage) [self.pdfView goToPreviousPage:nil];
+}
+
+- (void)pdfFitWidth {
+    self.pdfView.autoScales = YES;
+}
+
+- (void)pdfActualSize {
+    self.pdfView.autoScales = NO;
+    self.pdfView.scaleFactor = 1.0;
+}
+
+- (BOOL)hasPDF {
+    return self.pdfView.document != nil;
+}
+
+- (void)printPDF {
+    if (!self.pdfView.document) return;
+    NSPrintInfo *info = [[NSPrintInfo sharedPrintInfo] copy];
+    info.horizontalPagination = NSPrintingPaginationModeFit;
+    info.verticalPagination = NSPrintingPaginationModeFit;
+    [self.pdfView printWithInfo:info autoRotate:YES];
 }
 
 #pragma mark - NSToolbarDelegate

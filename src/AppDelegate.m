@@ -69,6 +69,7 @@
     [fileMenu addItemWithTitle:@"保存" action:@selector(saveDocumentAction:) keyEquivalent:@"s"];
     [fileMenu addItemWithTitle:@"另存为…" action:@selector(saveDocumentAsAction:) keyEquivalent:@"S"];
     [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"e"];
+    [fileMenu addItemWithTitle:@"打印 PDF…" action:@selector(printPDFAction:) keyEquivalent:@"p"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
     fileMenuItem.submenu = fileMenu;
@@ -127,6 +128,13 @@
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"放大" action:@selector(zoomInAction:) keyEquivalent:@"+"];
     [viewMenu addItemWithTitle:@"缩小" action:@selector(zoomOutAction:) keyEquivalent:@"-"];
+    [viewMenu addItemWithTitle:@"适合宽度" action:@selector(pdfFitWidthAction:) keyEquivalent:@"0"];
+    NSMenuItem *actual = [viewMenu addItemWithTitle:@"实际大小" action:@selector(pdfActualSizeAction:) keyEquivalent:@"0"];
+    actual.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    NSMenuItem *prevPage = [viewMenu addItemWithTitle:@"上一页" action:@selector(pdfPreviousPageAction:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey]];
+    prevPage.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *nextPage = [viewMenu addItemWithTitle:@"下一页" action:@selector(pdfNextPageAction:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey]];
+    nextPage.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [viewMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *fontUp = [viewMenu addItemWithTitle:@"编辑器字体放大" action:@selector(editorFontUpAction:) keyEquivalent:@"="];
     fontUp.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
@@ -215,6 +223,11 @@
         NSURL *pdfURL = self.mainWindowController.documentModel.expectedPDFURL;
         return pdfURL && [[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path];
     }
+    if (action == @selector(printPDFAction:) || action == @selector(pdfFitWidthAction:) ||
+        action == @selector(pdfActualSizeAction:) || action == @selector(pdfPreviousPageAction:) ||
+        action == @selector(pdfNextPageAction:) || action == @selector(zoomInAction:) || action == @selector(zoomOutAction:)) {
+        return [self.mainWindowController hasPDF];
+    }
     return YES;
 }
 
@@ -268,6 +281,12 @@
 - (void)editorFontResetAction:(id)sender {
     [self.mainWindowController resetEditorFontSize];
 }
+
+- (void)pdfFitWidthAction:(id)sender { [self.mainWindowController pdfFitWidth]; }
+- (void)pdfActualSizeAction:(id)sender { [self.mainWindowController pdfActualSize]; }
+- (void)pdfPreviousPageAction:(id)sender { [self.mainWindowController pdfPreviousPage]; }
+- (void)pdfNextPageAction:(id)sender { [self.mainWindowController pdfNextPage]; }
+- (void)printPDFAction:(id)sender { [self.mainWindowController printPDF]; }
 
 - (void)exportPDFAction:(id)sender {
     NSURL *pdfURL = self.mainWindowController.documentModel.expectedPDFURL;
