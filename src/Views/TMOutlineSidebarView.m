@@ -104,6 +104,7 @@
 @property (nonatomic, copy, readwrite) NSArray<TMOutlineItem *> *flatItems;
 
 @property (nonatomic, assign) BOOL isProgrammaticSelection;
+@property (nonatomic, assign) BOOL selectionChangedByClick;
 
 @end
 
@@ -375,6 +376,12 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
 }
 
 - (void)outlineViewClicked:(id)sender {
+    // 点击导致选中行变化时，outlineViewSelectionDidChange: 已经通知过了；
+    // 这里只处理“再次点击已选中的同一项”（用户想重新跳转）
+    if (_selectionChangedByClick) {
+        _selectionChangedByClick = NO;
+        return;
+    }
     NSInteger clickedRow = self.outlineView.clickedRow;
     if (clickedRow >= 0) {
         TMOutlineItem *item = [self.outlineView itemAtRow:clickedRow];
@@ -389,6 +396,7 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
 
     NSInteger selectedRow = self.outlineView.selectedRow;
     if (selectedRow >= 0) {
+        _selectionChangedByClick = YES;
         TMOutlineItem *item = [self.outlineView itemAtRow:selectedRow];
         if (item && [self.delegate respondsToSelector:@selector(outlineSidebarView:didSelectItem:)]) {
             [self.delegate outlineSidebarView:self didSelectItem:item];

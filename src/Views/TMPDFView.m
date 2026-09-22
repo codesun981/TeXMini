@@ -96,17 +96,12 @@
     PDFPage *page = [self.document pageAtIndex:pageIndex];
     if (!page) return;
 
-    // 先让 PDFKit 把目标区域滚到视野内（跨页、缩放都由它处理），再在下一轮 runloop 布局完成后画高亮，
-    // 否则 convertRect:fromPage: 拿到的是滚动前的坐标。
-    NSRect scrollTarget = NSInsetRect(pageRect, 0, -60);
-    [self goToRect:scrollTarget onPage:page];
+    [self removeOverlayIfAny];
+    [self scrollToCenterPageRect:pageRect onPage:page];
 
-    if (_currentOverlay) {
-        [_currentOverlay removeFromSuperview];
-        _currentOverlay = nil;
-    }
-
+    // 等这一轮布局结束再画高亮，convertRect:fromPage: 才是滚动后的坐标
     dispatch_async(dispatch_get_main_queue(), ^{
+        [self removeOverlayIfAny]; // 同一轮里若有多次请求，只保留最后一个
         NSRect viewRect = NSInsetRect([self convertRect:pageRect fromPage:page], -4, -2);
         TMHighlightOverlayView *overlay = [[TMHighlightOverlayView alloc] initWithFrame:viewRect];
         overlay.wantsLayer = YES;
@@ -115,19 +110,46 @@
         self->_currentOverlay = overlay;
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            if (self->_currentOverlay == overlay) {
-                [NSAnimationContext runAnimationGroup:^(NSAnimationContext * _Nonnull context) {
-                    context.duration = 0.5;
-                    overlay.animator.alphaValue = 0.0;
-                } completionHandler:^{
-                    [overlay removeFromSuperview];
-                    if (self->_currentOverlay == overlay) {
-                        self->_currentOverlay = nil;
-                    }
-                }];
-            }
+            // 无论它是否还是“当前”高亮，到点都必须淡出移除，否则会残留
+            if (overlay.superview == nil) return;
+            [NSAnimationContext runAnimationGroup:^(NSAnimationContext * _Nonnull context) {
+                context.duration = 0.5;
+                overlay.animator.alphaValue = 0.0;
+            } completionHandler:^{
+                [overlay removeFromSuperview];
+                if (self->_currentOverlay == overlay) {
+                    self->_currentOverlay = nil;
+                }
+            }];
         });
     });
+}
+
+/// 把页面上的矩形滚到视口正中（水平方向只在超出可见范围时才调整）。
+- (void)scrollToCenterPageRect:(NSRect)pageRect onPage:(PDFPage *)page {
+    NSView *docView = self.documentView;
+    NSScrollView *scrollView = docView.enclosingScrollView;
+    if (!docView || !scrollView) {
+        [self goToRect:pageRect onPage:page];
+        return;
+    }
+
+    NSRect inSelf = [self convertRect:pageRect fromPage:page];
+    NSRect inDoc = [docView convertRect:inSelf fromView:self];
+    NSClipView *clip = scrollView.contentView;
+    NSRect visible = clip.bounds;
+    NSRect docBounds = docView.bounds;
+
+    NSPoint origin = visible.origin;
+    origin.y = NSMidY(inDoc) - NSHeight(visible) / 2.0;
+    if (NSMinX(inDoc) < NSMinX(visible) || NSMaxX(inDoc) > NSMaxX(visible)) {
+        origin.x = NSMidX(inDoc) - NSWidth(visible) / 2.0;
+    }
+    origin.x = MAX(NSMinX(docBounds), MIN(origin.x, NSMaxX(docBounds) - NSWidth(visible)));
+    origin.y = MAX(NSMinY(docBounds), MIN(origin.y, NSMaxY(docBounds) - NSHeight(visible)));
+
+    [clip scrollToPoint:origin];
+    [scrollView reflectScrolledClipView:clip];
 }
 
 /// 滚动或缩放后叠加层位置就不对了，直接撤掉，避免高亮飘在错误的地方。
