@@ -32,6 +32,35 @@ TM_TEST(test_templates_are_not_empty) {
     TM_ASSERT_TRUE([TMDocument documentWithBlankTemplate].content.length > 0);
 }
 
+TM_TEST(test_unnamed_document_display_name) {
+    TMDocument *doc = [TMDocument documentWithBlankTemplate];
+    TM_ASSERT_NIL(doc.fileURL);
+    TM_ASSERT_EQ_STR(doc.displayName, @"未命名文档.tex");
+}
+
+TM_TEST(test_scratch_save_keeps_document_unnamed_and_dirty) {
+    TMDocument *doc = [TMDocument documentWithBlankTemplate];
+    doc.isDirty = YES;
+    NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"tmtest_scratch.tex"]];
+    TM_ASSERT_TRUE([doc saveScratchToURL:tmp error:NULL]);
+    TM_ASSERT_TRUE(doc.isScratch);
+    TM_ASSERT_TRUE(doc.isDirty);
+    TM_ASSERT_EQ_STR(doc.displayName, @"未命名文档.tex");
+    TM_ASSERT_TRUE(doc.fileURL != nil);
+}
+
+TM_TEST(test_real_save_clears_scratch_and_dirty) {
+    TMDocument *doc = [TMDocument documentWithBlankTemplate];
+    NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"tmtest_scratch2.tex"]];
+    [doc saveScratchToURL:tmp error:NULL];
+    doc.isDirty = YES;
+    NSURL *real = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:@"tmtest_real.tex"]];
+    TM_ASSERT_TRUE([doc saveToURL:real error:NULL]);
+    TM_ASSERT_TRUE(!doc.isScratch);
+    TM_ASSERT_TRUE(!doc.isDirty);
+    TM_ASSERT_EQ_STR(doc.displayName, @"tmtest_real.tex");
+}
+
 #pragma mark - Runner
 
 int main(void) {

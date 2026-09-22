@@ -62,11 +62,12 @@
         [TMCompiler sharedCompiler].delegate = self;
         [self loadDocumentIntoEditor];
 
-        // 首次打开未命名欢迎模板时，自动保存至临时缓存并触发初次编译，让用户第一眼看到分栏预览！
+        // 首次打开未命名欢迎模板时，暂存到临时目录并触发初次编译，让用户第一眼看到分栏预览。
+        // 注意用 saveScratchToURL: 而非 saveToURL:，否则之后 ⌘S 会静默写回 /tmp。
         if (!_documentModel.fileURL) {
             NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Welcome.tex"];
             NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-            [_documentModel saveToURL:tmpURL error:nil];
+            [_documentModel saveScratchToURL:tmpURL error:nil];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self compileCurrentDocument];
             });
@@ -346,11 +347,10 @@
 - (void)loadDocumentIntoEditor {
     if (self.documentModel) {
         self.editorTextView.string = self.documentModel.content ?: @"";
+        [self.editorTextView.undoManager removeAllActions];
         [self.editorTextView rehighlightAll];
         [self scheduleOutlineUpdateImmediate:YES];
-
-        NSString *fileName = self.documentModel.fileURL ? self.documentModel.fileURL.lastPathComponent : @"未命名文档.tex";
-        self.window.title = [NSString stringWithFormat:@"TeXMini - %@", fileName];
+        [self refreshWindowTitle];
 
         // 判断是否存在对应 PDF
         if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
@@ -362,7 +362,40 @@
     }
 }
 
+- (void)refreshWindowTitle {
+    self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.displayName];
+    self.window.representedURL = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
+    self.window.documentEdited = self.documentModel.isDirty;
+}
+
+- (BOOL)hasUnsavedChanges {
+    return self.documentModel.isDirty;
+}
+
+/// 在丢弃当前文档前询问用户。返回 YES 表示可以继续（已保存或用户选择不保存）。
+- (BOOL)confirmDiscardChangesWithTitle:(NSString *)title {
+    if (![self hasUnsavedChanges]) return YES;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = [NSString stringWithFormat:@"“%@” 有未保存的更改，不保存将丢失这些更改。", self.documentModel.displayName];
+    [alert addButtonWithTitle:@"保存"];
+    [alert addButtonWithTitle:@"不保存"];
+    [alert addButtonWithTitle:@"取消"];
+    alert.buttons[2].keyEquivalent = @"\e";
+
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertFirstButtonReturn) {
+        return [self saveCurrentDocument];
+    } else if (response == NSAlertSecondButtonReturn) {
+        return YES;
+    }
+    return NO;
+}
+
 - (void)openDocumentAtURL:(NSURL *)url {
+    if (![self confirmDiscardChangesWithTitle:@"打开其他文件前是否保存更改？"]) return;
+
     NSError *error = nil;
     TMDocument *newDoc = [TMDocument documentWithContentsOfURL:url error:&error];
     if (newDoc) {
@@ -375,25 +408,56 @@
     }
 }
 
-- (void)saveCurrentDocument {
+- (BOOL)saveCurrentDocument {
     self.documentModel.content = self.editorTextView.string;
 
-    if (!self.documentModel.fileURL) {
-        NSSavePanel *panel = [NSSavePanel savePanel];
-        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
-        panel.nameFieldStringValue = @"document.tex";
-        if ([panel runModal] == NSModalResponseOK && panel.URL) {
-            NSError *err = nil;
-            if ([self.documentModel saveToURL:panel.URL error:&err]) {
-                self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.fileURL.lastPathComponent];
-            } else {
-                [[NSAlert alertWithError:err] runModal];
-            }
-        }
-    } else {
-        NSError *err = nil;
-        [self.documentModel saveCurrentFileWithError:&err];
+    if (!self.documentModel.fileURL || self.documentModel.isScratch) {
+        return [self saveDocumentAs];
     }
+
+    NSError *err = nil;
+    if (![self.documentModel saveCurrentFileWithError:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return NO;
+    }
+    [self refreshWindowTitle];
+    return YES;
+}
+
+- (BOOL)saveDocumentAs {
+    self.documentModel.content = self.editorTextView.string;
+
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
+    panel.nameFieldStringValue = self.documentModel.isScratch || !self.documentModel.fileURL
+        ? @"document.tex"
+        : self.documentModel.fileURL.lastPathComponent;
+    if (!self.documentModel.isScratch && self.documentModel.fileURL) {
+        panel.directoryURL = self.documentModel.fileURL.URLByDeletingLastPathComponent;
+    }
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return NO;
+
+    NSError *err = nil;
+    if (![self.documentModel saveToURL:panel.URL error:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return NO;
+    }
+    [self refreshWindowTitle];
+    // 换了目录后旧的 PDF 不再对应，重新判断预览
+    if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
+        [self.pdfView loadPDFFromURL:self.documentModel.expectedPDFURL];
+        self.pdfPlaceholderView.hidden = YES;
+    } else {
+        self.pdfPlaceholderView.hidden = NO;
+    }
+    return YES;
+}
+
+#pragma mark - NSWindowDelegate
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    return [self confirmDiscardChangesWithTitle:@"关闭窗口前是否保存更改？"];
 }
 
 #pragma mark - 编译动作与回调
@@ -401,13 +465,14 @@
 - (void)compileCurrentDocument {
     self.documentModel.content = self.editorTextView.string;
 
-    // 如果还没有指定文件路径，自动保存到临时工作空间，省去弹窗干扰
+    // 如果还没有指定文件路径，暂存到临时工作空间，省去弹窗干扰
     if (!self.documentModel.fileURL) {
         NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Document.tex"];
         NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-        [self.documentModel saveToURL:tmpURL error:nil];
+        [self.documentModel saveScratchToURL:tmpURL error:nil];
     } else {
         [self.documentModel saveCurrentFileWithError:nil];
+        [self refreshWindowTitle];
     }
 
     [self.logDrawer clearLog];
@@ -474,6 +539,10 @@
 #pragma mark - TMEditorTextViewDelegate & NSTextDelegate
 
 - (void)textDidChange:(NSNotification *)notification {
+    if (!self.documentModel.isDirty) {
+        self.documentModel.isDirty = YES;
+        self.window.documentEdited = YES;
+    }
     [self scheduleOutlineUpdateImmediate:NO];
 }
 
@@ -693,6 +762,7 @@
 #pragma mark - 模板与工具栏操作
 
 - (void)newDocumentAction:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"新建文档前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithBlankTemplate];
     [self loadDocumentIntoEditor];
 }
@@ -708,6 +778,7 @@
 }
 
 - (void)applyDefaultTemplate:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithDefaultTemplate];
     [self.statusBar setSelectedEngine:TMTeXEngineLatexmk];
     [TMCompiler sharedCompiler].engine = TMTeXEngineLatexmk;
@@ -716,6 +787,7 @@
 }
 
 - (void)applyChineseTemplate:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithChineseTemplate];
     [self.statusBar setSelectedEngine:TMTeXEngineXeLaTeX];
     [TMCompiler sharedCompiler].engine = TMTeXEngineXeLaTeX;
@@ -724,6 +796,7 @@
 }
 
 - (void)applyBlankTemplate:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithBlankTemplate];
     [self loadDocumentIntoEditor];
 }

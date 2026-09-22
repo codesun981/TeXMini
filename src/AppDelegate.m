@@ -32,6 +32,13 @@
     return YES;
 }
 
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    if (self.mainWindowController && ![self.mainWindowController confirmDiscardChangesWithTitle:@"退出前是否保存更改？"]) {
+        return NSTerminateCancel;
+    }
+    return NSTerminateNow;
+}
+
 #pragma mark - 菜单栏配置
 
 - (void)setupMainMenu {
@@ -58,6 +65,7 @@
     [fileMenu addItemWithTitle:@"打开…" action:@selector(openDocumentAction:) keyEquivalent:@"o"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"保存" action:@selector(saveDocumentAction:) keyEquivalent:@"s"];
+    [fileMenu addItemWithTitle:@"另存为…" action:@selector(saveDocumentAsAction:) keyEquivalent:@"S"];
     [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"e"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
@@ -133,6 +141,10 @@
 
 - (void)saveDocumentAction:(id)sender {
     [self.mainWindowController saveCurrentDocument];
+}
+
+- (void)saveDocumentAsAction:(id)sender {
+    [self.mainWindowController saveDocumentAs];
 }
 
 - (void)compileDocumentAction:(id)sender {

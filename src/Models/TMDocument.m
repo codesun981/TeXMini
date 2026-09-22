@@ -68,12 +68,16 @@
 }
 
 + (nullable instancetype)documentWithContentsOfURL:(NSURL *)url error:(NSError **)error {
-    NSString *str = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:error];
+    NSError *utf8Error = nil;
+    NSString *str = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:&utf8Error];
     if (!str) {
-        // 尝试非 UTF-8
-        str = [NSString stringWithContentsOfURL:url encoding:NSISOLatin1StringEncoding error:error];
+        // 尝试非 UTF-8；仍失败则报告首次（更有意义）的错误
+        str = [NSString stringWithContentsOfURL:url encoding:NSISOLatin1StringEncoding error:nil];
+        if (!str) {
+            if (error) *error = utf8Error;
+            return nil;
+        }
     }
-    if (!str) return nil;
 
     TMDocument *doc = [[TMDocument alloc] init];
     doc.fileURL = url;
@@ -94,17 +98,33 @@
     return [[self.fileURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:[base stringByAppendingPathExtension:@"synctex.gz"]];
 }
 
+- (NSString *)displayName {
+    if (!self.fileURL || self.isScratch) return @"未命名文档.tex";
+    return self.fileURL.lastPathComponent;
+}
+
 - (BOOL)saveToURL:(NSURL *)url error:(NSError **)error {
     BOOL success = [self.content writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:error];
     if (success) {
         self.fileURL = url;
         self.isDirty = NO;
+        self.isScratch = NO;
+    }
+    return success;
+}
+
+- (BOOL)saveScratchToURL:(NSURL *)url error:(NSError **)error {
+    BOOL success = [self.content writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:error];
+    if (success) {
+        self.fileURL = url;
+        self.isScratch = YES;
     }
     return success;
 }
 
 - (BOOL)saveCurrentFileWithError:(NSError **)error {
     if (!self.fileURL) return NO;
+    if (self.isScratch) return [self saveScratchToURL:self.fileURL error:error];
     return [self saveToURL:self.fileURL error:error];
 }
 
