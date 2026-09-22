@@ -33,6 +33,7 @@ clang -fobjc-arc -O2 \
     src/Services/TMEditActions.m \
     src/Services/TMMagicComments.m \
     src/Services/TMLogParser.m \
+    src/Services/TMRecentFiles.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
     src/Views/TMEditorTextView.m \

@@ -1,7 +1,12 @@
 #import "AppDelegate.h"
 #import "TMDocument.h"
 #import "TMCompiler.h"
+#import "TMRecentFiles.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+@interface AppDelegate () <NSMenuDelegate>
+@property (nonatomic, strong) NSMenu *recentMenu;
+@end
 
 @implementation AppDelegate
 
@@ -26,6 +31,7 @@
         TMDocument *doc = [TMDocument documentWithContentsOfURL:fileURL error:nil];
         self.mainWindowController = [[TMMainWindowController alloc] initWithDocument:doc];
         [self.mainWindowController showWindow:nil];
+        if (doc) [TMRecentFiles noteFileURL:fileURL];
     }
     return YES;
 }
@@ -65,6 +71,11 @@
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
     [fileMenu addItemWithTitle:@"新建" action:@selector(newDocumentAction:) keyEquivalent:@"n"];
     [fileMenu addItemWithTitle:@"打开…" action:@selector(openDocumentAction:) keyEquivalent:@"o"];
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"打开最近" action:nil keyEquivalent:@""];
+    self.recentMenu = [[NSMenu alloc] initWithTitle:@"打开最近"];
+    self.recentMenu.delegate = self;
+    recentItem.submenu = self.recentMenu;
+    [fileMenu addItem:recentItem];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"保存" action:@selector(saveDocumentAction:) keyEquivalent:@"s"];
     [fileMenu addItemWithTitle:@"另存为…" action:@selector(saveDocumentAsAction:) keyEquivalent:@"S"];
@@ -156,6 +167,46 @@
     [mainMenu addItem:windowMenuItem];
 
     [NSApp setMainMenu:mainMenu];
+}
+
+#pragma mark - 最近打开
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != self.recentMenu) return;
+    [menu removeAllItems];
+
+    NSArray<NSURL *> *urls = [TMRecentFiles recentFileURLs];
+    for (NSURL *url in urls) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:url.lastPathComponent action:@selector(openRecentAction:) keyEquivalent:@""];
+        item.representedObject = url;
+        item.toolTip = url.path;
+        item.image = [[NSWorkspace sharedWorkspace] iconForFile:url.path];
+        item.image.size = NSMakeSize(16, 16);
+        item.target = self;
+        [menu addItem:item];
+    }
+    if (urls.count == 0) {
+        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"无最近项目" action:nil keyEquivalent:@""];
+        empty.enabled = NO;
+        [menu addItem:empty];
+    }
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *clear = [[NSMenuItem alloc] initWithTitle:@"清除菜单" action:@selector(clearRecentAction:) keyEquivalent:@""];
+    clear.target = self;
+    clear.enabled = urls.count > 0;
+    [menu addItem:clear];
+}
+
+- (void)openRecentAction:(NSMenuItem *)sender {
+    NSURL *url = sender.representedObject;
+    if ([url isKindOfClass:[NSURL class]]) {
+        [self.mainWindowController openDocumentAtURL:url];
+        [self.mainWindowController.window makeKeyAndOrderFront:nil];
+    }
+}
+
+- (void)clearRecentAction:(id)sender {
+    [TMRecentFiles clear];
 }
 
 #pragma mark - 菜单快捷响应

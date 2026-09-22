@@ -8,7 +8,13 @@
 #import "TMSyncTeX.h"
 #import "TMOutlineSidebarView.h"
 #import "TMOutlineParser.h"
+#import "TMRecentFiles.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+static NSString *const kTMDefaultsEngine = @"TMEngine";
+static NSString *const kTMDefaultsFontSize = @"TMEditorFontSize";
+static NSString *const kTMDefaultsOutlineWidth = @"TMOutlineWidth";
+static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 @interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate>
 
@@ -52,18 +58,24 @@
 
     self = [super initWithWindow:window];
     if (self) {
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         _documentModel = document ?: [TMDocument documentWithDefaultTemplate];
         _currentCursorLine = 1;
         _currentCursorCol = 1;
-        _lastOutlineWidth = 220.0;
-        _isOutlineCollapsed = NO;
-        _autoCompileEnabled = [[NSUserDefaults standardUserDefaults] boolForKey:@"TMAutoCompile"];
+        CGFloat savedWidth = [defaults doubleForKey:kTMDefaultsOutlineWidth];
+        _lastOutlineWidth = (savedWidth >= 160.0 && savedWidth <= 380.0) ? savedWidth : 220.0;
+        _isOutlineCollapsed = [defaults boolForKey:kTMDefaultsOutlineCollapsed];
+        _autoCompileEnabled = [defaults boolForKey:@"TMAutoCompile"];
         window.delegate = self;
 
         [self setupUI];
         [self setupToolbar];
         [TMCompiler sharedCompiler].delegate = self;
+        [self restorePersistedPreferences];
         [self loadDocumentIntoEditor];
+
+        // 窗口位置/大小交给系统自动保存
+        [window setFrameAutosaveName:@"TMMainWindow"];
 
         // 首次打开未命名欢迎模板时，暂存到临时目录并触发初次编译，让用户第一眼看到分栏预览。
         // 注意用 saveScratchToURL: 而非 saveToURL:，否则之后 ⌘S 会静默写回 /tmp。
@@ -84,8 +96,6 @@
     contentView.wantsLayer = YES;
     NSRect bounds = contentView.bounds;
 
-    _lastOutlineWidth = 220.0;
-
     // 1. 外层水平分栏 (MainSplitView: 左大纲侧边栏 + 右工作区分栏)
     _mainSplitView = [[NSSplitView alloc] initWithFrame:bounds];
     _mainSplitView.vertical = YES;
@@ -105,6 +115,7 @@
     _splitView.vertical = YES;
     _splitView.dividerStyle = NSSplitViewDividerStyleThin;
     _splitView.delegate = self;
+    _splitView.autosaveName = @"TMContentSplit";
     _splitView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
     CGFloat halfWidth = floor((contentWidth - 1.0) / 2.0);
@@ -254,6 +265,29 @@
     self.window.toolbarStyle = NSWindowToolbarStyleUnified;
 }
 
+#pragma mark - 偏好持久化
+
+- (void)restorePersistedPreferences {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
+
+    if ([defaults objectForKey:kTMDefaultsEngine]) {
+        NSInteger engine = [defaults integerForKey:kTMDefaultsEngine];
+        if (engine >= TMTeXEngineLatexmk && engine <= TMTeXEnginePDFLaTeX) {
+            [TMCompiler sharedCompiler].engine = (TMTeXEngine)engine;
+            [self.statusBar setSelectedEngine:(TMTeXEngine)engine];
+        }
+    }
+
+    CGFloat fontSize = [defaults doubleForKey:kTMDefaultsFontSize];
+    if (fontSize >= 9.0 && fontSize <= 30.0) {
+        self.editorTextView.editorFontSize = fontSize;
+    }
+}
+
+- (void)persistEditorFontSize {
+    [[NSUserDefaults standardUserDefaults] setDouble:self.editorTextView.editorFontSize forKey:kTMDefaultsFontSize];
+}
+
 #pragma mark - NSSplitView 分栏布局与控制
 
 - (void)layoutMainSplitView {
@@ -344,6 +378,7 @@
         CGFloat w = self.outlineSidebarView.frame.size.width;
         if (w >= 160.0 && w <= 380.0) {
             self.lastOutlineWidth = w;
+            [[NSUserDefaults standardUserDefaults] setDouble:w forKey:kTMDefaultsOutlineWidth];
         }
     }
 }
@@ -400,6 +435,14 @@
 }
 
 - (void)openDocumentAtURL:(NSURL *)url {
+    if (![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+        [TMRecentFiles removeFileURL:url];
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"文件不存在";
+        alert.informativeText = [NSString stringWithFormat:@"找不到 “%@”，可能已被移动或删除。", url.path];
+        [alert runModal];
+        return;
+    }
     if (![self confirmDiscardChangesWithTitle:@"打开其他文件前是否保存更改？"]) return;
 
     NSError *error = nil;
@@ -408,6 +451,7 @@
         self.documentModel = newDoc;
         [self loadDocumentIntoEditor];
         [self.statusBar showReadyState];
+        [TMRecentFiles noteFileURL:url];
     } else {
         NSAlert *alert = [NSAlert alertWithError:error];
         [alert runModal];
@@ -450,6 +494,7 @@
         return NO;
     }
     [self refreshWindowTitle];
+    [TMRecentFiles noteFileURL:panel.URL];
     // 换了目录后旧的 PDF 不再对应，重新判断预览
     if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
         [self.pdfView loadPDFFromURL:self.documentModel.expectedPDFURL];
@@ -653,14 +698,17 @@
 
 - (void)increaseEditorFontSize {
     self.editorTextView.editorFontSize = self.editorTextView.editorFontSize + 1.0;
+    [self persistEditorFontSize];
 }
 
 - (void)decreaseEditorFontSize {
     self.editorTextView.editorFontSize = self.editorTextView.editorFontSize - 1.0;
+    [self persistEditorFontSize];
 }
 
 - (void)resetEditorFontSize {
     self.editorTextView.editorFontSize = 13.5;
+    [self persistEditorFontSize];
 }
 
 #pragma mark - TMStatusBarViewDelegate
@@ -676,6 +724,7 @@
 
 - (void)statusBarDidChangeEngine:(TMTeXEngine)engine {
     [TMCompiler sharedCompiler].engine = engine;
+    [[NSUserDefaults standardUserDefaults] setInteger:engine forKey:kTMDefaultsEngine];
 }
 
 #pragma mark - 大纲解析与侧边栏控制
@@ -714,6 +763,7 @@
         // 展开大纲
         self.isOutlineCollapsed = NO;
     }
+    [[NSUserDefaults standardUserDefaults] setBool:self.isOutlineCollapsed forKey:kTMDefaultsOutlineCollapsed];
 
     [self layoutMainSplitView];
     [self.mainSplitView adjustSubviews];

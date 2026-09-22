@@ -5,6 +5,7 @@
 #import "TMEditActions.h"
 #import "TMMagicComments.h"
 #import "TMLogParser.h"
+#import "TMRecentFiles.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -177,6 +178,32 @@ TM_TEST(test_log_parser_file_line_error_format) {
     TM_ASSERT_EQ_INT(issues[0].line, 15);
     TM_ASSERT_EQ_STR(issues[0].message, @"Undefined control sequence.");
     TM_ASSERT_EQ_INT(issues[1].line, 20);
+}
+
+#pragma mark - TMRecentFiles
+
+TM_TEST(test_recent_files_most_recent_first_and_deduplicated) {
+    [TMRecentFiles clear];
+    [TMRecentFiles noteFileURL:[NSURL fileURLWithPath:@"/tmp/a.tex"]];
+    [TMRecentFiles noteFileURL:[NSURL fileURLWithPath:@"/tmp/b.tex"]];
+    [TMRecentFiles noteFileURL:[NSURL fileURLWithPath:@"/tmp/a.tex"]];
+    NSArray<NSURL *> *urls = [TMRecentFiles recentFileURLs];
+    TM_ASSERT_EQ_INT(urls.count, 2);
+    TM_ASSERT_EQ_STR(urls[0].path, @"/tmp/a.tex");
+    TM_ASSERT_EQ_STR(urls[1].path, @"/tmp/b.tex");
+}
+
+TM_TEST(test_recent_files_capped_at_ten_and_removable) {
+    [TMRecentFiles clear];
+    for (int i = 0; i < 12; i++) {
+        [TMRecentFiles noteFileURL:[NSURL fileURLWithPath:[NSString stringWithFormat:@"/tmp/f%d.tex", i]]];
+    }
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFileURLs].count, 10);
+    TM_ASSERT_EQ_STR([TMRecentFiles recentFileURLs][0].path, @"/tmp/f11.tex");
+    [TMRecentFiles removeFileURL:[NSURL fileURLWithPath:@"/tmp/f11.tex"]];
+    TM_ASSERT_EQ_STR([TMRecentFiles recentFileURLs][0].path, @"/tmp/f10.tex");
+    [TMRecentFiles clear];
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFileURLs].count, 0);
 }
 
 #pragma mark - Runner

@@ -12,6 +12,7 @@ clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     src/Services/TMEditActions.m \
     src/Services/TMMagicComments.m \
     src/Services/TMLogParser.m \
+    src/Services/TMRecentFiles.m \
     tests/TMTests.m \
     -o build/tmtests
 
