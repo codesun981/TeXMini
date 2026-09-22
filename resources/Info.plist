@@ -39,9 +39,38 @@
             <array>
                 <string>tex</string>
                 <string>latex</string>
+                <string>ltx</string>
             </array>
             <key>LSHandlerRank</key>
             <string>Owner</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>LaTeX Support File</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>bib</string>
+                <string>sty</string>
+                <string>cls</string>
+                <string>bst</string>
+                <string>dtx</string>
+            </array>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Folder</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.folder</string>
+            </array>
+            <key>LSHandlerRank</key>
+            <string>None</string>
         </dict>
     </array>
 </dict>

@@ -9,13 +9,14 @@
 #import "TMOutlineSidebarView.h"
 #import "TMOutlineParser.h"
 #import "TMRecentFiles.h"
+#import "TMProject.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kTMDefaultsEngine = @"TMEngine";
 static NSString *const kTMDefaultsFontSize = @"TMEditorFontSize";
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
-@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate>
+@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate>
 
 // 外层：系统 NSSplitViewController 负责侧边栏折叠、分割线隐藏、宽度记忆
 @property (nonatomic, strong) NSSplitViewController *mainSplitViewController;
@@ -37,6 +38,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 @property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
+@property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
 
 @end
 
@@ -108,6 +110,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     CGFloat sidebarWidth = 220.0;
     _outlineSidebarView = [[TMOutlineSidebarView alloc] initWithFrame:NSMakeRect(0, 0, sidebarWidth, bounds.size.height)];
     _outlineSidebarView.delegate = self;
+    _outlineSidebarView.fileBrowserView.delegate = self;
     NSViewController *sidebarVC = [[NSViewController alloc] init];
     sidebarVC.view = _outlineSidebarView;
     _sidebarItem = [NSSplitViewItem sidebarWithViewController:sidebarVC];
@@ -346,8 +349,75 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [self.editorTextView rehighlightAll];
         [self scheduleOutlineUpdateImmediate:YES];
         [self refreshWindowTitle];
-        [self showPDFIfExistsAtURL:self.documentModel.expectedPDFURL];
+        [self syncProjectRootWithDocument];
+        // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
+        [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
     }
+}
+
+- (nullable NSURL *)expectedPDFURLForMainFile {
+    NSURL *main = [self mainFileURLForCompile];
+    if (!main) return nil;
+    NSString *base = main.lastPathComponent.stringByDeletingPathExtension;
+    return [main.URLByDeletingLastPathComponent URLByAppendingPathComponent:[base stringByAppendingPathExtension:@"pdf"]];
+}
+
+#pragma mark - 项目（文件夹）
+
+/// 文档有正式路径时，让文件浏览器的根目录覆盖它：若当前根已包含该文件则保持不变
+/// （在 chapters/ 里切换文件时不应把根跳到子目录），否则用文件所在目录。
+- (void)syncProjectRootWithDocument {
+    NSURL *fileURL = self.documentModel.fileURL;
+    if (!fileURL || self.documentModel.isScratch) {
+        [self.outlineSidebarView.fileBrowserView selectFileURL:nil];
+        return;
+    }
+    NSString *filePath = fileURL.URLByStandardizingPath.path;
+    NSString *rootPath = self.projectRootURL.URLByStandardizingPath.path;
+    BOOL inside = rootPath && [filePath hasPrefix:[rootPath stringByAppendingString:@"/"]];
+    if (!inside) {
+        [self setProjectRootURL:fileURL.URLByDeletingLastPathComponent reload:YES];
+    } else {
+        [self.outlineSidebarView.fileBrowserView reload];
+    }
+    [self.outlineSidebarView.fileBrowserView selectFileURL:fileURL];
+}
+
+- (void)setProjectRootURL:(nullable NSURL *)url reload:(BOOL)reload {
+    self.projectRootURL = url.URLByStandardizingPath;
+    if (reload) [self.outlineSidebarView.fileBrowserView setRootDirectoryURL:self.projectRootURL];
+}
+
+- (void)openFolderAtURL:(NSURL *)folderURL {
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:folderURL.path isDirectory:&isDir] || !isDir) return;
+
+    [self setProjectRootURL:folderURL reload:YES];
+    self.outlineSidebarView.mode = TMSidebarModeFiles;
+    if (self.sidebarItem.isCollapsed) [self toggleOutlineSidebar];
+
+    NSURL *main = [TMProject guessMainFileInDirectory:folderURL];
+    if (main) {
+        [self openDocumentAtURL:main];
+    } else {
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已打开文件夹 %@，未找到含 \\documentclass 的主文件", folderURL.lastPathComponent]];
+    }
+}
+
+/// 决定 ⌘B 实际编译哪个文件：暂存文档就是自己；否则按魔法注释 / \documentclass / 同目录引用推断。
+- (NSURL *)mainFileURLForCompile {
+    NSURL *fileURL = self.documentModel.fileURL;
+    if (!fileURL || self.documentModel.isScratch) return fileURL;
+    return [TMProject mainFileURLForDocumentURL:fileURL content:self.documentModel.content] ?: fileURL;
+}
+
+#pragma mark - TMFileBrowserViewDelegate
+
+- (void)fileBrowserView:(TMFileBrowserView *)browser didSelectFileURL:(NSURL *)url {
+    if ([url.URLByStandardizingPath isEqual:self.documentModel.fileURL.URLByStandardizingPath]) return;
+    [self openDocumentAtURL:url];
+    // 用户取消了保存提示时，把选中项拨回当前文件
+    [browser selectFileURL:self.documentModel.isScratch ? nil : self.documentModel.fileURL];
 }
 
 /// 若 url 处已有 PDF 就载入预览并记为 currentPDFURL；否则显示占位提示。
@@ -394,12 +464,21 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 }
 
 - (void)openDocumentAtURL:(NSURL *)url {
-    if (![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&isDir]) {
         [TMRecentFiles removeFileURL:url];
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"文件不存在";
         alert.informativeText = [NSString stringWithFormat:@"找不到 “%@”，可能已被移动或删除。", url.path];
         [alert runModal];
+        return;
+    }
+    if (isDir) {
+        [self openFolderAtURL:url];
+        return;
+    }
+    if (![TMProject isEditableFileURL:url]) {
+        [[NSWorkspace sharedWorkspace] openURL:url];
         return;
     }
     if (![self confirmDiscardChangesWithTitle:@"打开其他文件前是否保存更改？"]) return;
@@ -454,8 +533,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     }
     [self refreshWindowTitle];
     [TMRecentFiles noteFileURL:panel.URL];
+    [self syncProjectRootWithDocument];
     // 换了目录后旧的 PDF 不再对应，重新判断预览
-    [self showPDFIfExistsAtURL:self.documentModel.expectedPDFURL];
+    [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
     return YES;
 }
 
@@ -529,7 +609,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     }
 
     [self.logDrawer clearLog];
-    [[TMCompiler sharedCompiler] compileFileAtURL:self.documentModel.fileURL];
+    [[TMCompiler sharedCompiler] compileFileAtURL:[self mainFileURLForCompile]];
 }
 
 - (void)cancelCompilation {
@@ -606,6 +686,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     self.currentPDFURL = pdfURL;
     self.pdfPlaceholderView.hidden = YES;
     [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
+    [self.outlineSidebarView.fileBrowserView reload];
     [self runPendingAutoCompileIfNeeded];
 }
 
@@ -650,17 +731,24 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
                                                  pdfPath:pdf];
     if (!res || res.sourceLine <= 0) return;
 
-    // SyncTeX 返回的文件名可能是相对 PDF 目录的路径；与当前文档不一致时不能盲目跳行。
+    // SyncTeX 返回的文件名可能是相对 PDF 目录的路径；落在别的文件时直接切过去再跳行。
     if (res.sourceFilePath.length > 0 && self.documentModel.fileURL) {
         NSURL *pdfDir = self.currentPDFURL.URLByDeletingLastPathComponent;
         NSURL *target = [NSURL fileURLWithPath:res.sourceFilePath relativeToURL:pdfDir];
         NSString *targetPath = target.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
         NSString *currentPath = self.documentModel.fileURL.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
         if (targetPath && currentPath && ![targetPath isEqualToString:currentPath]) {
-            NSBeep();
-            [self.statusBar showInfoMessage:[NSString stringWithFormat:@"该位置来自 %@ 第 %ld 行（当前未打开）",
-                                             targetPath.lastPathComponent, (long)res.sourceLine]];
-            return;
+            NSURL *targetURL = [NSURL fileURLWithPath:targetPath];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:targetPath] || ![TMProject isEditableFileURL:targetURL]) {
+                NSBeep();
+                [self.statusBar showInfoMessage:[NSString stringWithFormat:@"该位置来自 %@ 第 %ld 行，文件不可打开",
+                                                 targetPath.lastPathComponent, (long)res.sourceLine]];
+                return;
+            }
+            [self openDocumentAtURL:targetURL];
+            if (![self.documentModel.fileURL.URLByStandardizingPath.URLByResolvingSymlinksInPath.path isEqualToString:targetPath]) {
+                return; // 用户取消了切换
+            }
         }
     }
 
@@ -1028,9 +1116,28 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 - (void)openFileAction:(id)sender {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = YES;
+    panel.message = @"选择 .tex / .bib / .sty 等文件，或直接选择一个项目文件夹";
+    NSMutableArray<UTType *> *types = [NSMutableArray arrayWithObject:UTTypeFolder];
+    for (NSString *ext in [TMProject editableExtensions]) {
+        UTType *t = [UTType typeWithFilenameExtension:ext];
+        if (t) [types addObject:t];
+    }
+    [types addObject:UTTypePlainText];
+    panel.allowedContentTypes = types;
     if ([panel runModal] == NSModalResponseOK && panel.URL) {
         [self openDocumentAtURL:panel.URL];
+    }
+}
+
+- (void)openFolderAction:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.message = @"选择包含 .tex 文件的项目文件夹";
+    if ([panel runModal] == NSModalResponseOK && panel.URL) {
+        [self openFolderAtURL:panel.URL];
     }
 }
 

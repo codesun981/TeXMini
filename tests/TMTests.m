@@ -6,6 +6,7 @@
 #import "TMMagicComments.h"
 #import "TMLogParser.h"
 #import "TMRecentFiles.h"
+#import "TMProject.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -204,6 +205,92 @@ TM_TEST(test_recent_files_capped_at_ten_and_removable) {
     TM_ASSERT_EQ_STR([TMRecentFiles recentFileURLs][0].path, @"/tmp/f10.tex");
     [TMRecentFiles clear];
     TM_ASSERT_EQ_INT([TMRecentFiles recentFileURLs].count, 0);
+}
+
+#pragma mark - TMProject
+
+static NSURL *tm_makeTempProject(void) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"tmproj-%@", NSUUID.UUID.UUIDString]];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"chapters"] withIntermediateDirectories:YES attributes:nil error:nil];
+    [fm createDirectoryAtPath:[dir stringByAppendingPathComponent:@"build"] withIntermediateDirectories:YES attributes:nil error:nil];
+    NSDictionary *files = @{
+        @"main.tex": @"\\documentclass{article}\n\\begin{document}\n\\input{chapters/intro}\n\\include{chapters/method}\n\\end{document}\n",
+        @"notes.tex": @"% \\documentclass{article} 被注释掉了，不算主文件\nsome notes\n",
+        @"chapters/intro.tex": @"\\section{Intro}\n",
+        @"chapters/method.tex": @"\\section{Method}\n",
+        @"refs.bib": @"@article{a, title={T}}\n",
+        @"main.pdf": @"%PDF-1.4 fake\n",
+        @"main.aux": @"aux\n",
+        @"figure.pdf": @"%PDF-1.4 fig\n",
+        @"build/junk.tex": @"\\documentclass{article}\n",
+    };
+    for (NSString *rel in files) {
+        [files[rel] writeToFile:[dir stringByAppendingPathComponent:rel] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    return [NSURL fileURLWithPath:dir];
+}
+
+TM_TEST(test_project_editable_extensions) {
+    TM_ASSERT_TRUE([TMProject isEditableFileURL:[NSURL fileURLWithPath:@"/x/a.tex"]]);
+    TM_ASSERT_TRUE([TMProject isEditableFileURL:[NSURL fileURLWithPath:@"/x/refs.BIB"]]);
+    TM_ASSERT_TRUE([TMProject isEditableFileURL:[NSURL fileURLWithPath:@"/x/my.cls"]]);
+    TM_ASSERT_TRUE(![TMProject isEditableFileURL:[NSURL fileURLWithPath:@"/x/fig.png"]]);
+    TM_ASSERT_TRUE(![TMProject isEditableFileURL:[NSURL fileURLWithPath:@"/x/noext"]]);
+}
+
+TM_TEST(test_project_main_file_from_chapter_via_input) {
+    NSURL *root = tm_makeTempProject();
+    NSURL *intro = [root URLByAppendingPathComponent:@"chapters/intro.tex"];
+    NSURL *main = [TMProject mainFileURLForDocumentURL:intro content:@"\\section{Intro}\n"];
+    TM_ASSERT_EQ_STR(main.lastPathComponent, @"main.tex");
+    NSURL *method = [root URLByAppendingPathComponent:@"chapters/method.tex"];
+    main = [TMProject mainFileURLForDocumentURL:method content:@"\\section{Method}\n"];
+    TM_ASSERT_EQ_STR(main.lastPathComponent, @"main.tex");
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+TM_TEST(test_project_main_file_self_when_declares_documentclass) {
+    NSURL *root = tm_makeTempProject();
+    NSURL *mainURL = [root URLByAppendingPathComponent:@"main.tex"];
+    NSString *content = [NSString stringWithContentsOfURL:mainURL encoding:NSUTF8StringEncoding error:nil];
+    TM_ASSERT_EQ_STR([TMProject mainFileURLForDocumentURL:mainURL content:content].path, mainURL.path);
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+TM_TEST(test_project_main_file_magic_root_wins) {
+    NSURL *root = tm_makeTempProject();
+    NSURL *notes = [root URLByAppendingPathComponent:@"notes.tex"];
+    NSURL *main = [TMProject mainFileURLForDocumentURL:notes content:@"% !TEX root = main.tex\nhi\n"];
+    TM_ASSERT_EQ_STR(main.lastPathComponent, @"main.tex");
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+TM_TEST(test_project_main_file_single_candidate_in_same_dir) {
+    NSURL *root = tm_makeTempProject();
+    // notes.tex 没引用 orphan.tex，但目录里只有 main.tex 一个候选 → 用它
+    NSURL *orphan = [root URLByAppendingPathComponent:@"orphan.tex"];
+    [@"text" writeToURL:orphan atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    TM_ASSERT_EQ_STR([TMProject mainFileURLForDocumentURL:orphan content:@"text"].lastPathComponent, @"main.tex");
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+TM_TEST(test_project_guess_main_in_directory_ignores_commented_documentclass) {
+    NSURL *root = tm_makeTempProject();
+    TM_ASSERT_EQ_STR([TMProject guessMainFileInDirectory:root].lastPathComponent, @"main.tex");
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+TM_TEST(test_project_file_tree_filters_aux_build_and_twin_pdf) {
+    NSURL *root = tm_makeTempProject();
+    NSArray<TMFileNode *> *tree = [TMProject fileTreeForDirectory:root maxDepth:3];
+    NSMutableArray *names = [NSMutableArray array];
+    for (TMFileNode *n in tree) [names addObject:n.name];
+    // 目录优先；build/ 被忽略；main.aux 不显示；main.pdf 与 main.tex 同名不显示；figure.pdf 显示
+    TM_ASSERT_EQ_STR([names componentsJoinedByString:@","], @"chapters,figure.pdf,main.tex,notes.tex,refs.bib");
+    TM_ASSERT_TRUE(tree[0].isDirectory);
+    TM_ASSERT_EQ_INT(tree[0].children.count, 2);
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
 }
 
 #pragma mark - Runner

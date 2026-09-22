@@ -71,6 +71,7 @@
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
     [fileMenu addItemWithTitle:@"新建" action:@selector(newDocumentAction:) keyEquivalent:@"n"];
     [fileMenu addItemWithTitle:@"打开…" action:@selector(openDocumentAction:) keyEquivalent:@"o"];
+    [fileMenu addItemWithTitle:@"打开文件夹…" action:@selector(openFolderAction:) keyEquivalent:@"O"];
     NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"打开最近" action:nil keyEquivalent:@""];
     self.recentMenu = [[NSMenu alloc] initWithTitle:@"打开最近"];
     self.recentMenu.delegate = self;
@@ -236,11 +237,11 @@
 }
 
 - (void)openDocumentAction:(id)sender {
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
-    if ([panel runModal] == NSModalResponseOK && panel.URL) {
-        [self.mainWindowController openDocumentAtURL:panel.URL];
-    }
+    [self.mainWindowController openFileAction:sender];
+}
+
+- (void)openFolderAction:(id)sender {
+    [self.mainWindowController openFolderAction:sender];
 }
 
 - (void)saveDocumentAction:(id)sender {

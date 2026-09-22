@@ -1,7 +1,13 @@
 #import <Cocoa/Cocoa.h>
 #import "TMOutlineItem.h"
+#import "TMFileBrowserView.h"
 
 NS_ASSUME_NONNULL_BEGIN
+
+typedef NS_ENUM(NSInteger, TMSidebarMode) {
+    TMSidebarModeOutline = 0,
+    TMSidebarModeFiles = 1
+};
 
 @class TMOutlineSidebarView;
 
@@ -11,11 +17,16 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)outlineSidebarViewDidRequestToggle:(TMOutlineSidebarView *)sidebar;
 @end
 
+/// 左侧侧边栏：顶部“大纲 | 文件”切换，下面是章节大纲或项目文件树。
 @interface TMOutlineSidebarView : NSVisualEffectView
 
 @property (nonatomic, weak, nullable) id<TMOutlineSidebarViewDelegate> delegate;
 @property (nonatomic, readonly) NSArray<TMOutlineItem *> *rootItems;
 @property (nonatomic, readonly) NSArray<TMOutlineItem *> *flatItems;
+/// 文件页；控制器负责设置其 delegate 与根目录。
+@property (nonatomic, strong, readonly) TMFileBrowserView *fileBrowserView;
+/// 当前显示的页，持久化到 NSUserDefaults。
+@property (nonatomic, assign) TMSidebarMode mode;
 
 /**
  * 更新大纲数据源并刷新视图。

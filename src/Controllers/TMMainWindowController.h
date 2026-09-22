@@ -12,7 +12,13 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithDocument:(TMDocument *)document;
 - (void)newDocumentAction:(nullable id)sender;
+/// 打开文件或文件夹：目录 → 设为项目根并打开推断出的主文件；可编辑文本 → 载入编辑器；其他 → 交给系统。
 - (void)openDocumentAtURL:(NSURL *)url;
+- (void)openFolderAtURL:(NSURL *)folderURL;
+- (void)openFileAction:(nullable id)sender;
+- (void)openFolderAction:(nullable id)sender;
+/// 当前项目根目录（文件浏览器的根）。
+@property (nonatomic, strong, readonly, nullable) NSURL *projectRootURL;
 - (void)compileCurrentDocument;
 - (void)cancelCompilation;
 - (BOOL)isCompiling;
