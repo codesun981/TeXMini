@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -e
+
+APP_NAME="TeXMini"
+APP_DIR="build/${APP_NAME}.app"
+CONTENTS_DIR="${APP_DIR}/Contents"
+MACOS_DIR="${CONTENTS_DIR}/MacOS"
+RESOURCES_DIR="${CONTENTS_DIR}/Resources"
+
+echo "==> 正在编译 ${APP_NAME}..."
+
+mkdir -p "${MACOS_DIR}"
+mkdir -p "${RESOURCES_DIR}"
+
+clang -fobjc-arc -O2 \
+    -framework Cocoa \
+    -framework PDFKit \
+    -framework UniformTypeIdentifiers \
+    -lz \
+    -ISources/CSynctex \
+    -Isrc \
+    -Isrc/Models \
+    -Isrc/Services \
+    -Isrc/Views \
+    -Isrc/Controllers \
+    Sources/CSynctex/synctex_parser.c \
+    Sources/CSynctex/synctex_parser_utils.c \
+    src/Models/TMDocument.m \
+    src/Models/TMOutlineItem.m \
+    src/Services/TMCompiler.m \
+    src/Services/TMSyncTeX.m \
+    src/Services/TMOutlineParser.m \
+    src/Views/TMLineNumberRulerView.m \
+    src/Views/TMLaTeXHighlighter.m \
+    src/Views/TMEditorTextView.m \
+    src/Views/TMPDFView.m \
+    src/Views/TMStatusBarView.m \
+    src/Views/TMLogDrawerView.m \
+    src/Views/TMOutlineSidebarView.m \
+    src/Controllers/TMMainWindowController.m \
+    src/AppDelegate.m \
+    src/main.m \
+    -o "${MACOS_DIR}/${APP_NAME}"
+
+cp resources/Info.plist "${CONTENTS_DIR}/Info.plist"
+
+# 复制一份图标（如有）
+if [ -f "resources/${APP_NAME}.icns" ]; then
+    cp "resources/${APP_NAME}.icns" "${RESOURCES_DIR}/"
+fi
+
+# Ad-hoc codesign
+codesign --force --deep --sign - "${APP_DIR}" 2>/dev/null || true
+
+echo "==> 构建完成！生成目录: ${APP_DIR}"
+ls -lh "${MACOS_DIR}/${APP_NAME}"

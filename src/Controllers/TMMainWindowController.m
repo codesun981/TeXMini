@@ -1,0 +1,744 @@
+#import "TMMainWindowController.h"
+#import "TMEditorTextView.h"
+#import "TMLineNumberRulerView.h"
+#import "TMPDFView.h"
+#import "TMStatusBarView.h"
+#import "TMLogDrawerView.h"
+#import "TMCompiler.h"
+#import "TMSyncTeX.h"
+#import "TMOutlineSidebarView.h"
+#import "TMOutlineParser.h"
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate>
+
+@property (nonatomic, strong) NSSplitView *mainSplitView;
+@property (nonatomic, strong) TMOutlineSidebarView *outlineSidebarView;
+@property (nonatomic, strong) NSSplitView *splitView;
+@property (nonatomic, strong) TMEditorTextView *editorTextView;
+@property (nonatomic, strong) NSScrollView *editorScrollView;
+@property (nonatomic, strong) NSView *pdfContainerView;
+@property (nonatomic, strong) TMPDFView *pdfView;
+@property (nonatomic, strong) NSView *pdfPlaceholderView;
+@property (nonatomic, strong) TMStatusBarView *statusBar;
+@property (nonatomic, strong) TMLogDrawerView *logDrawer;
+
+@property (nonatomic, assign) NSInteger currentCursorLine;
+@property (nonatomic, assign) NSInteger currentCursorCol;
+@property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
+@property (nonatomic, assign) CGFloat lastOutlineWidth;
+@property (nonatomic, assign) BOOL isOutlineCollapsed;
+
+@end
+
+@implementation TMMainWindowController
+
+- (instancetype)initWithDocument:(TMDocument *)document {
+    NSRect screenRect = [NSScreen mainScreen].visibleFrame;
+    CGFloat winWidth = MIN(1300.0, screenRect.size.width - 100);
+    CGFloat winHeight = MIN(860.0, screenRect.size.height - 100);
+
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, winWidth, winHeight)
+                                                   styleMask:(NSWindowStyleMaskTitled |
+                                                              NSWindowStyleMaskClosable |
+                                                              NSWindowStyleMaskMiniaturizable |
+                                                              NSWindowStyleMaskResizable)
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    [window center];
+    window.minSize = NSMakeSize(750, 500);
+
+    self = [super initWithWindow:window];
+    if (self) {
+        _documentModel = document ?: [TMDocument documentWithDefaultTemplate];
+        _currentCursorLine = 1;
+        _currentCursorCol = 1;
+        _lastOutlineWidth = 220.0;
+        _isOutlineCollapsed = NO;
+        window.delegate = self;
+
+        [self setupUI];
+        [self setupToolbar];
+        [TMCompiler sharedCompiler].delegate = self;
+        [self loadDocumentIntoEditor];
+
+        // 首次打开未命名欢迎模板时，自动保存至临时缓存并触发初次编译，让用户第一眼看到分栏预览！
+        if (!_documentModel.fileURL) {
+            NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Welcome.tex"];
+            NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
+            [_documentModel saveToURL:tmpURL error:nil];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self compileCurrentDocument];
+            });
+        }
+    }
+    return self;
+}
+
+- (void)setupUI {
+    NSView *contentView = self.window.contentView;
+    contentView.wantsLayer = YES;
+    NSRect bounds = contentView.bounds;
+
+    _lastOutlineWidth = 220.0;
+
+    // 1. 外层水平分栏 (MainSplitView: 左大纲侧边栏 + 右工作区分栏)
+    _mainSplitView = [[NSSplitView alloc] initWithFrame:bounds];
+    _mainSplitView.vertical = YES;
+    _mainSplitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _mainSplitView.delegate = self;
+    _mainSplitView.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:_mainSplitView];
+
+    // 1.1 大纲侧边栏
+    _outlineSidebarView = [[TMOutlineSidebarView alloc] initWithFrame:NSMakeRect(0, 0, _lastOutlineWidth, bounds.size.height)];
+    _outlineSidebarView.delegate = self;
+    [_mainSplitView addSubview:_outlineSidebarView];
+
+    // 1.2 内层工作区分栏 (ContentSplitView: 代码编辑 + PDF 预览)
+    CGFloat contentWidth = MAX(400, bounds.size.width - _lastOutlineWidth - 1.0);
+    _splitView = [[NSSplitView alloc] initWithFrame:NSMakeRect(_lastOutlineWidth + 1.0, 0, contentWidth, bounds.size.height)];
+    _splitView.vertical = YES;
+    _splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _splitView.delegate = self;
+    _splitView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    CGFloat halfWidth = floor((contentWidth - 1.0) / 2.0);
+    CGFloat initialHeight = bounds.size.height > 100 ? bounds.size.height - 30 : 600;
+
+    // 1.2.1 代码编辑区 (ScrollView + Ruler + EditorTextView)
+    _editorScrollView = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0, halfWidth, initialHeight)];
+    _editorScrollView.hasVerticalScroller = YES;
+    _editorScrollView.hasHorizontalScroller = NO;
+    _editorScrollView.borderType = NSNoBorder;
+    _editorScrollView.hasVerticalRuler = YES;
+    _editorScrollView.rulersVisible = YES;
+    _editorScrollView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+
+    _editorTextView = [[TMEditorTextView alloc] initWithFrame:_editorScrollView.bounds];
+    _editorTextView.minSize = NSMakeSize(0.0, _editorScrollView.contentSize.height);
+    _editorTextView.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+    _editorTextView.verticallyResizable = YES;
+    _editorTextView.horizontallyResizable = NO;
+    _editorTextView.autoresizingMask = NSViewWidthSizable;
+    _editorTextView.textContainer.containerSize = NSMakeSize(_editorScrollView.contentSize.width, FLT_MAX);
+    _editorTextView.textContainer.widthTracksTextView = YES;
+    _editorTextView.editorDelegate = self;
+    _editorTextView.delegate = self;
+    [_editorTextView setupEditor];
+
+    _editorScrollView.documentView = _editorTextView;
+
+    TMLineNumberRulerView *ruler = [[TMLineNumberRulerView alloc] initWithScrollView:_editorScrollView];
+    _editorScrollView.verticalRulerView = ruler;
+
+    [_splitView addSubview:_editorScrollView];
+
+    // 1.2.2 右栏：PDF 预览容器 (含 PDFKit 及占位提示)
+    _pdfContainerView = [[NSView alloc] initWithFrame:NSMakeRect(halfWidth + 1.0, 0, halfWidth, initialHeight)];
+    _pdfContainerView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _pdfContainerView.wantsLayer = YES;
+    _pdfContainerView.layer.backgroundColor = [NSColor windowBackgroundColor].CGColor;
+
+    _pdfView = [[TMPDFView alloc] initWithFrame:_pdfContainerView.bounds];
+    _pdfView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [_pdfView setupPDFView];
+    _pdfView.syncDelegate = self;
+    [_pdfContainerView addSubview:_pdfView];
+
+    // 占位视图 (当未编译出 PDF 时显示提示)
+    [self setupPlaceholderView];
+    [_pdfContainerView addSubview:_pdfPlaceholderView];
+
+    [_splitView addSubview:_pdfContainerView];
+
+    // 将工作区分栏加入外层主分栏
+    [_mainSplitView addSubview:_splitView];
+
+    // 设置侧边栏固定倾向、工作区拉伸倾向
+    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultHigh forSubviewAtIndex:0];
+    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
+
+    // 2. 抽屉式日志视图
+    _logDrawer = [[TMLogDrawerView alloc] init];
+    _logDrawer.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:_logDrawer];
+
+    // 3. 底部状态栏
+    _statusBar = [[TMStatusBarView alloc] init];
+    _statusBar.delegate = self;
+    _statusBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:_statusBar];
+
+    // 自动布局约束
+    [NSLayoutConstraint activateConstraints:@[
+        [_mainSplitView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
+        [_mainSplitView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [_mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [_mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
+
+        [_logDrawer.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [_logDrawer.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [_logDrawer.bottomAnchor constraintEqualToAnchor:_statusBar.topAnchor],
+
+        [_statusBar.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [_statusBar.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [_statusBar.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
+        [_statusBar.heightAnchor constraintEqualToConstant:28]
+    ]];
+
+    // 初始均分左右分栏与大纲侧边栏
+    [self layoutMainSplitView];
+}
+
+- (void)setupPlaceholderView {
+    _pdfPlaceholderView = [[NSView alloc] initWithFrame:_pdfContainerView.bounds];
+    _pdfPlaceholderView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    _pdfPlaceholderView.wantsLayer = YES;
+
+    NSImageView *iconView = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"doc.text.magnifyingglass" accessibilityDescription:nil]];
+    iconView.contentTintColor = [NSColor secondaryLabelColor];
+    iconView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_pdfPlaceholderView addSubview:iconView];
+
+    NSTextField *titleLabel = [NSTextField labelWithString:@"LaTeX PDF 实时预览"];
+    titleLabel.font = [NSFont systemFontOfSize:17 weight:NSFontWeightSemibold];
+    titleLabel.textColor = [NSColor labelColor];
+    titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_pdfPlaceholderView addSubview:titleLabel];
+
+    NSTextField *subLabel = [NSTextField labelWithString:@"在左侧编辑代码，按 ⌘B 自动保存并编译"];
+    subLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightRegular];
+    subLabel.textColor = [NSColor secondaryLabelColor];
+    subLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_pdfPlaceholderView addSubview:subLabel];
+
+    NSButton *compileBtn = [NSButton buttonWithTitle:@"▶ 立即编译预览 (⌘B)" target:self action:@selector(compileCurrentDocument)];
+    compileBtn.bezelStyle = NSBezelStyleRounded;
+    compileBtn.controlSize = NSControlSizeRegular;
+    compileBtn.keyEquivalent = @"\r";
+    compileBtn.translatesAutoresizingMaskIntoConstraints = NO;
+    [_pdfPlaceholderView addSubview:compileBtn];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [iconView.centerXAnchor constraintEqualToAnchor:_pdfPlaceholderView.centerXAnchor],
+        [iconView.centerYAnchor constraintEqualToAnchor:_pdfPlaceholderView.centerYAnchor constant:-60],
+        [iconView.widthAnchor constraintEqualToConstant:64],
+        [iconView.heightAnchor constraintEqualToConstant:64],
+
+        [titleLabel.centerXAnchor constraintEqualToAnchor:_pdfPlaceholderView.centerXAnchor],
+        [titleLabel.topAnchor constraintEqualToAnchor:iconView.bottomAnchor constant:12],
+
+        [subLabel.centerXAnchor constraintEqualToAnchor:_pdfPlaceholderView.centerXAnchor],
+        [subLabel.topAnchor constraintEqualToAnchor:titleLabel.bottomAnchor constant:6],
+
+        [compileBtn.centerXAnchor constraintEqualToAnchor:_pdfPlaceholderView.centerXAnchor],
+        [compileBtn.topAnchor constraintEqualToAnchor:subLabel.bottomAnchor constant:16]
+    ]];
+}
+
+- (void)setupToolbar {
+    NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"TMMainWindowToolbar"];
+    toolbar.allowsUserCustomization = NO;
+    toolbar.autosavesConfiguration = NO;
+    toolbar.displayMode = NSToolbarDisplayModeIconOnly;
+    toolbar.delegate = self;
+    self.window.toolbar = toolbar;
+    self.window.toolbarStyle = NSWindowToolbarStyleUnified;
+}
+
+#pragma mark - NSSplitView 分栏布局与控制
+
+- (void)layoutMainSplitView {
+    NSRect bounds = self.mainSplitView.bounds;
+    if (bounds.size.width <= 0 || bounds.size.height <= 0) return;
+
+    CGFloat d = self.mainSplitView.dividerThickness;
+
+    if (self.isOutlineCollapsed) {
+        self.outlineSidebarView.hidden = YES;
+        self.outlineSidebarView.frame = NSMakeRect(0, 0, 0, bounds.size.height);
+        self.splitView.frame = bounds;
+    } else {
+        self.outlineSidebarView.hidden = NO;
+        CGFloat sidebarW = self.lastOutlineWidth;
+        if (sidebarW < 160.0 || sidebarW > 380.0) {
+            sidebarW = 220.0;
+        }
+        if (bounds.size.width > 600.0) {
+            sidebarW = MIN(sidebarW, bounds.size.width - 400.0);
+        }
+        CGFloat contentW = MAX(0, bounds.size.width - sidebarW - d);
+
+        self.outlineSidebarView.frame = NSMakeRect(0, 0, sidebarW, bounds.size.height);
+        self.splitView.frame = NSMakeRect(sidebarW + d, 0, contentW, bounds.size.height);
+    }
+    [self.splitView adjustSubviews];
+}
+
+#pragma mark - NSSplitViewDelegate (保证分栏永不塌陷、主侧边栏可折叠)
+
+- (BOOL)splitView:(NSSplitView *)splitView canCollapseSubview:(NSView *)subview {
+    return NO;
+}
+
+- (BOOL)splitView:(NSSplitView *)splitView shouldHideDividerAtIndex:(NSInteger)dividerIndex {
+    if (splitView == self.mainSplitView && dividerIndex == 0) {
+        return self.isOutlineCollapsed || self.outlineSidebarView.isHidden || self.outlineSidebarView.frame.size.width <= 0;
+    }
+    return NO;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMinimumPosition ofSubviewAt:(NSInteger)dividerIndex {
+    if (splitView == self.mainSplitView) {
+        return 160.0;
+    }
+    return 280.0;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMaximumPosition ofSubviewAt:(NSInteger)dividerIndex {
+    if (splitView == self.mainSplitView) {
+        return 380.0;
+    }
+    return splitView.bounds.size.width - 280.0;
+}
+
+- (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize {
+    if (splitView == self.mainSplitView) {
+        [self layoutMainSplitView];
+    } else if (splitView == self.splitView) {
+        NSRect bounds = splitView.bounds;
+        CGFloat d = splitView.dividerThickness;
+        if (splitView.subviews.count >= 2) {
+            NSView *leftView = splitView.subviews[0];
+            NSView *rightView = splitView.subviews[1];
+
+            CGFloat leftWidth = leftView.frame.size.width;
+            if (leftWidth < 200 || oldSize.width < 200) {
+                leftWidth = floor((bounds.size.width - d) * 0.5);
+            } else {
+                CGFloat ratio = leftWidth / (oldSize.width - d);
+                leftWidth = floor((bounds.size.width - d) * ratio);
+            }
+
+            leftWidth = MAX(280.0, MIN(leftWidth, bounds.size.width - d - 280.0));
+            CGFloat rightWidth = bounds.size.width - d - leftWidth;
+
+            leftView.frame = NSMakeRect(0, 0, leftWidth, bounds.size.height);
+            rightView.frame = NSMakeRect(leftWidth + d, 0, rightWidth, bounds.size.height);
+        } else {
+            [splitView adjustSubviews];
+        }
+    }
+}
+
+- (void)splitViewDidResizeSubviews:(NSNotification *)notification {
+    if (notification.object == self.mainSplitView && !self.isOutlineCollapsed) {
+        CGFloat w = self.outlineSidebarView.frame.size.width;
+        if (w >= 160.0 && w <= 380.0) {
+            self.lastOutlineWidth = w;
+        }
+    }
+}
+
+#pragma mark - 文档管理与加载
+
+- (void)loadDocumentIntoEditor {
+    if (self.documentModel) {
+        self.editorTextView.string = self.documentModel.content ?: @"";
+        [self.editorTextView rehighlightAll];
+        [self scheduleOutlineUpdateImmediate:YES];
+
+        NSString *fileName = self.documentModel.fileURL ? self.documentModel.fileURL.lastPathComponent : @"未命名文档.tex";
+        self.window.title = [NSString stringWithFormat:@"TeXMini - %@", fileName];
+
+        // 判断是否存在对应 PDF
+        if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
+            [self.pdfView loadPDFFromURL:self.documentModel.expectedPDFURL];
+            self.pdfPlaceholderView.hidden = YES;
+        } else {
+            self.pdfPlaceholderView.hidden = NO;
+        }
+    }
+}
+
+- (void)openDocumentAtURL:(NSURL *)url {
+    NSError *error = nil;
+    TMDocument *newDoc = [TMDocument documentWithContentsOfURL:url error:&error];
+    if (newDoc) {
+        self.documentModel = newDoc;
+        [self loadDocumentIntoEditor];
+        [self.statusBar showReadyState];
+    } else {
+        NSAlert *alert = [NSAlert alertWithError:error];
+        [alert runModal];
+    }
+}
+
+- (void)saveCurrentDocument {
+    self.documentModel.content = self.editorTextView.string;
+
+    if (!self.documentModel.fileURL) {
+        NSSavePanel *panel = [NSSavePanel savePanel];
+        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
+        panel.nameFieldStringValue = @"document.tex";
+        if ([panel runModal] == NSModalResponseOK && panel.URL) {
+            NSError *err = nil;
+            if ([self.documentModel saveToURL:panel.URL error:&err]) {
+                self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.fileURL.lastPathComponent];
+            } else {
+                [[NSAlert alertWithError:err] runModal];
+            }
+        }
+    } else {
+        NSError *err = nil;
+        [self.documentModel saveCurrentFileWithError:&err];
+    }
+}
+
+#pragma mark - 编译动作与回调
+
+- (void)compileCurrentDocument {
+    self.documentModel.content = self.editorTextView.string;
+
+    // 如果还没有指定文件路径，自动保存到临时工作空间，省去弹窗干扰
+    if (!self.documentModel.fileURL) {
+        NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Document.tex"];
+        NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
+        [self.documentModel saveToURL:tmpURL error:nil];
+    } else {
+        [self.documentModel saveCurrentFileWithError:nil];
+    }
+
+    [self.logDrawer clearLog];
+    [[TMCompiler sharedCompiler] compileFileAtURL:self.documentModel.fileURL];
+}
+
+- (void)compilerDidStartCompilingDocument:(NSURL *)fileURL {
+    NSString *engineName = @"latexmk";
+    if ([TMCompiler sharedCompiler].engine == TMTeXEngineXeLaTeX) engineName = @"xelatex";
+    if ([TMCompiler sharedCompiler].engine == TMTeXEnginePDFLaTeX) engineName = @"pdflatex";
+    [self.statusBar showCompilingStateWithEngine:engineName];
+}
+
+- (void)compilerDidOutputLog:(NSString *)text {
+    [self.logDrawer appendLogText:text];
+}
+
+- (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL {
+    [self.statusBar showSuccessStateWithDuration:durationSeconds];
+    self.pdfPlaceholderView.hidden = YES;
+    [self.pdfView loadPDFFromURL:pdfURL];
+    [self.pdfView reloadPreservingViewport];
+}
+
+- (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log {
+    [self.statusBar showErrorStateWithMessage:summary line:lineNumber];
+    if (!self.logDrawer.isExpanded) {
+        [self.logDrawer toggleAnimated];
+    }
+}
+
+#pragma mark - SyncTeX 双向同步
+
+- (void)forwardSyncToPDF {
+    if (!self.documentModel.fileURL || !self.documentModel.expectedPDFURL) return;
+
+    NSString *src = self.documentModel.fileURL.path;
+    NSString *pdf = self.documentModel.expectedPDFURL.path;
+
+    TMSyncTeXResult *res = [TMSyncTeX forwardSearchLine:self.currentCursorLine
+                                                 column:self.currentCursorCol
+                                             sourceFile:src
+                                                pdfPath:pdf
+                                               pdfView:self.pdfView];
+    if (res) {
+        [self.pdfView flashHighlightRect:res.targetRect onPageAtIndex:res.pageIndex];
+    }
+}
+
+- (void)pdfViewDidRequestInverseSearchAtPoint:(NSPoint)pointOnPage pageIndex:(NSInteger)pageIndex pageBounds:(NSRect)pageBounds {
+    if (!self.documentModel.expectedPDFURL) return;
+
+    NSString *pdf = self.documentModel.expectedPDFURL.path;
+    TMSyncTeXResult *res = [TMSyncTeX inverseSearchPoint:pointOnPage
+                                               pageIndex:pageIndex
+                                              pageBounds:pageBounds
+                                                 pdfPath:pdf];
+    if (res && res.sourceLine > 0) {
+        [self.editorTextView jumpToLine:res.sourceLine column:res.sourceColumn];
+        [self.window makeFirstResponder:self.editorTextView];
+    }
+}
+
+#pragma mark - TMEditorTextViewDelegate & NSTextDelegate
+
+- (void)textDidChange:(NSNotification *)notification {
+    [self scheduleOutlineUpdateImmediate:NO];
+}
+
+- (void)editorTextViewDidChangeCursorPositionToLine:(NSInteger)line column:(NSInteger)column {
+    self.currentCursorLine = line;
+    self.currentCursorCol = column;
+    [self.statusBar setCursorLine:line column:column totalChars:self.editorTextView.string.length];
+    [self.outlineSidebarView highlightItemForLineNumber:line];
+}
+
+#pragma mark - TMStatusBarViewDelegate
+
+- (void)statusBarDidClickErrorLine:(NSInteger)line {
+    [self.editorTextView jumpToLine:line column:1];
+    [self.window makeFirstResponder:self.editorTextView];
+}
+
+- (void)statusBarDidToggleLogDrawer {
+    [self toggleLogDrawer];
+}
+
+- (void)statusBarDidChangeEngine:(TMTeXEngine)engine {
+    [TMCompiler sharedCompiler].engine = engine;
+}
+
+#pragma mark - 大纲解析与侧边栏控制
+
+- (void)scheduleOutlineUpdateImmediate:(BOOL)immediate {
+    [self.outlineDebounceTimer invalidate];
+    if (immediate) {
+        [self updateOutline];
+    } else {
+        self.outlineDebounceTimer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                                                     target:self
+                                                                   selector:@selector(updateOutline)
+                                                                   userInfo:nil
+                                                                    repeats:NO];
+    }
+}
+
+- (void)updateOutline {
+    NSString *content = self.editorTextView.string;
+    NSArray<TMOutlineItem *> *flatList = nil;
+    NSArray<TMOutlineItem *> *rootItems = [TMOutlineParser parseOutlineFromLaTeXString:content flatList:&flatList];
+    [self.outlineSidebarView updateWithRootItems:rootItems flatItems:flatList];
+    [self.outlineSidebarView highlightItemForLineNumber:self.currentCursorLine];
+}
+
+- (void)toggleOutlineSidebar {
+    if (!self.isOutlineCollapsed) {
+        // 收起大纲
+        CGFloat currentW = self.outlineSidebarView.frame.size.width;
+        if (currentW >= 160.0 && currentW <= 380.0) {
+            self.lastOutlineWidth = currentW;
+        }
+        self.isOutlineCollapsed = YES;
+    } else {
+        // 展开大纲
+        self.isOutlineCollapsed = NO;
+    }
+
+    [self layoutMainSplitView];
+    [self.mainSplitView adjustSubviews];
+}
+
+#pragma mark - TMOutlineSidebarViewDelegate
+
+- (void)outlineSidebarView:(TMOutlineSidebarView *)sidebar didSelectItem:(TMOutlineItem *)item {
+    if (item) {
+        [self.editorTextView jumpToLine:item.lineNumber column:1];
+        [self.window makeFirstResponder:self.editorTextView];
+    }
+}
+
+- (void)outlineSidebarViewDidRequestToggle:(TMOutlineSidebarView *)sidebar {
+    [self toggleOutlineSidebar];
+}
+
+#pragma mark - 公共导航动作
+
+- (IBAction)toggleSidebar:(nullable id)sender {
+    [self toggleOutlineSidebar];
+}
+
+- (void)toggleLogDrawer {
+    [self.logDrawer toggleAnimated];
+}
+
+- (void)zoomIn {
+    [self.pdfView zoomIn:nil];
+}
+
+- (void)zoomOut {
+    [self.pdfView zoomOut:nil];
+}
+
+#pragma mark - NSToolbarDelegate
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
+    return @[
+        NSToolbarToggleSidebarItemIdentifier,
+        @"ToggleOutline",
+        NSToolbarSpaceItemIdentifier,
+        @"NewDoc",
+        @"TemplateDoc",
+        @"OpenDoc",
+        @"SaveDoc",
+        NSToolbarSpaceItemIdentifier,
+        @"CompileDoc",
+        @"ForwardSync",
+        @"CleanAux",
+        NSToolbarFlexibleSpaceItemIdentifier,
+        @"ZoomIn",
+        @"ZoomOut",
+        @"ToggleLog"
+    ];
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
+    return @[
+        NSToolbarToggleSidebarItemIdentifier,
+        NSToolbarSpaceItemIdentifier,
+        @"NewDoc",
+        @"TemplateDoc",
+        @"OpenDoc",
+        @"SaveDoc",
+        NSToolbarSpaceItemIdentifier,
+        @"CompileDoc",
+        @"ForwardSync",
+        @"CleanAux",
+        NSToolbarFlexibleSpaceItemIdentifier,
+        @"ZoomIn",
+        @"ZoomOut",
+        @"ToggleLog"
+    ];
+}
+
+- (nullable NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSToolbarItemIdentifier)itemIdentifier willBeInsertedIntoToolbar:(BOOL)flag {
+    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
+
+    if ([itemIdentifier isEqualToString:NSToolbarToggleSidebarItemIdentifier] || [itemIdentifier isEqualToString:@"ToggleOutline"]) {
+        item.label = @"大纲";
+        item.paletteLabel = @"切换大纲视图";
+        item.toolTip = @"显示或折叠左侧大纲 (⌘1)";
+        item.image = [NSImage imageWithSystemSymbolName:@"sidebar.left" accessibilityDescription:@"Outline"];
+        item.target = self;
+        item.action = @selector(toggleOutlineSidebar);
+    } else if ([itemIdentifier isEqualToString:@"NewDoc"]) {
+        item.label = @"新建";
+        item.paletteLabel = @"新建文档";
+        item.toolTip = @"新建空白文档 (⌘N)";
+        item.image = [NSImage imageWithSystemSymbolName:@"doc.badge.plus" accessibilityDescription:@"New"];
+        item.target = self;
+        item.action = @selector(newDocumentAction:);
+    } else if ([itemIdentifier isEqualToString:@"TemplateDoc"]) {
+        item.label = @"模板";
+        item.paletteLabel = @"从模板新建";
+        item.toolTip = @"从预置模板开始";
+        item.image = [NSImage imageWithSystemSymbolName:@"square.grid.2x2" accessibilityDescription:@"Templates"];
+        item.target = self;
+        item.action = @selector(showTemplateMenuAction:);
+    } else if ([itemIdentifier isEqualToString:@"OpenDoc"]) {
+        item.label = @"打开";
+        item.paletteLabel = @"打开文件";
+        item.toolTip = @"打开本地 LaTeX 文件 (⌘O)";
+        item.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:@"Open"];
+        item.target = self;
+        item.action = @selector(openFileAction:);
+    } else if ([itemIdentifier isEqualToString:@"SaveDoc"]) {
+        item.label = @"保存";
+        item.paletteLabel = @"保存文件";
+        item.toolTip = @"保存当前代码 (⌘S)";
+        item.image = [NSImage imageWithSystemSymbolName:@"square.and.arrow.down" accessibilityDescription:@"Save"];
+        item.target = self;
+        item.action = @selector(saveCurrentDocument);
+    } else if ([itemIdentifier isEqualToString:@"CompileDoc"]) {
+        item.label = @"编译 (⌘B)";
+        item.paletteLabel = @"编译文档";
+        item.toolTip = @"保存并自动编译生成 PDF (⌘B)";
+        item.image = [NSImage imageWithSystemSymbolName:@"play.circle.fill" accessibilityDescription:@"Compile"];
+        item.target = self;
+        item.action = @selector(compileCurrentDocument);
+    } else if ([itemIdentifier isEqualToString:@"ForwardSync"]) {
+        item.label = @"同步 (⌘J)";
+        item.paletteLabel = @"正向跳转至 PDF";
+        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J)";
+        item.image = [NSImage imageWithSystemSymbolName:@"arrow.right.circle" accessibilityDescription:@"Sync to PDF"];
+        item.target = self;
+        item.action = @selector(forwardSyncToPDF);
+    } else if ([itemIdentifier isEqualToString:@"CleanAux"]) {
+        item.label = @"清理";
+        item.paletteLabel = @"清理缓存文件";
+        item.toolTip = @"清理 .aux、.log、.fls 等缓存文件";
+        item.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"Clean"];
+        item.target = self;
+        item.action = @selector(cleanAuxFilesAction:);
+    } else if ([itemIdentifier isEqualToString:@"ZoomIn"]) {
+        item.label = @"放大";
+        item.image = [NSImage imageWithSystemSymbolName:@"plus.magnifyingglass" accessibilityDescription:@"Zoom In"];
+        item.target = self;
+        item.action = @selector(zoomIn);
+    } else if ([itemIdentifier isEqualToString:@"ZoomOut"]) {
+        item.label = @"缩小";
+        item.image = [NSImage imageWithSystemSymbolName:@"minus.magnifyingglass" accessibilityDescription:@"Zoom Out"];
+        item.target = self;
+        item.action = @selector(zoomOut);
+    } else if ([itemIdentifier isEqualToString:@"ToggleLog"]) {
+        item.label = @"日志";
+        item.image = [NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:@"Toggle Log"];
+        item.target = self;
+        item.action = @selector(toggleLogDrawer);
+    }
+
+    return item;
+}
+
+#pragma mark - 模板与工具栏操作
+
+- (void)newDocumentAction:(id)sender {
+    self.documentModel = [TMDocument documentWithBlankTemplate];
+    [self loadDocumentIntoEditor];
+}
+
+- (void)showTemplateMenuAction:(id)sender {
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Templates"];
+    [menu addItemWithTitle:@"📄 学术论文模板 (Article / Math)" action:@selector(applyDefaultTemplate:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"🇨🇳 中文研究报告 (CTeX / XeLaTeX)" action:@selector(applyChineseTemplate:) keyEquivalent:@""];
+    [menu addItemWithTitle:@"📝 纯净空白文档 (Blank)" action:@selector(applyBlankTemplate:) keyEquivalent:@""];
+
+    NSView *targetView = [sender isKindOfClass:[NSView class]] ? sender : self.window.contentView;
+    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(80, self.window.contentView.bounds.size.height - 40) inView:targetView];
+}
+
+- (void)applyDefaultTemplate:(id)sender {
+    self.documentModel = [TMDocument documentWithDefaultTemplate];
+    [self.statusBar setSelectedEngine:TMTeXEngineLatexmk];
+    [TMCompiler sharedCompiler].engine = TMTeXEngineLatexmk;
+    [self loadDocumentIntoEditor];
+    [self compileCurrentDocument];
+}
+
+- (void)applyChineseTemplate:(id)sender {
+    self.documentModel = [TMDocument documentWithChineseTemplate];
+    [self.statusBar setSelectedEngine:TMTeXEngineXeLaTeX];
+    [TMCompiler sharedCompiler].engine = TMTeXEngineXeLaTeX;
+    [self loadDocumentIntoEditor];
+    [self compileCurrentDocument];
+}
+
+- (void)applyBlankTemplate:(id)sender {
+    self.documentModel = [TMDocument documentWithBlankTemplate];
+    [self loadDocumentIntoEditor];
+}
+
+- (void)openFileAction:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
+    if ([panel runModal] == NSModalResponseOK && panel.URL) {
+        [self openDocumentAtURL:panel.URL];
+    }
+}
+
+- (void)cleanAuxFilesAction:(id)sender {
+    [self.documentModel cleanAuxiliaryFiles];
+    [self.statusBar showReadyState];
+}
+
+@end
