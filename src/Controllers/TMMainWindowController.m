@@ -493,8 +493,7 @@
 - (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL {
     [self.statusBar showSuccessStateWithDuration:durationSeconds];
     self.pdfPlaceholderView.hidden = YES;
-    [self.pdfView loadPDFFromURL:pdfURL];
-    [self.pdfView reloadPreservingViewport];
+    [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
 }
 
 - (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log {
@@ -530,10 +529,24 @@
                                                pageIndex:pageIndex
                                               pageBounds:pageBounds
                                                  pdfPath:pdf];
-    if (res && res.sourceLine > 0) {
-        [self.editorTextView jumpToLine:res.sourceLine column:res.sourceColumn];
-        [self.window makeFirstResponder:self.editorTextView];
+    if (!res || res.sourceLine <= 0) return;
+
+    // SyncTeX 返回的文件名可能是相对 PDF 目录的路径；与当前文档不一致时不能盲目跳行。
+    if (res.sourceFilePath.length > 0 && self.documentModel.fileURL) {
+        NSURL *pdfDir = self.documentModel.expectedPDFURL.URLByDeletingLastPathComponent;
+        NSURL *target = [NSURL fileURLWithPath:res.sourceFilePath relativeToURL:pdfDir];
+        NSString *targetPath = target.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
+        NSString *currentPath = self.documentModel.fileURL.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
+        if (targetPath && currentPath && ![targetPath isEqualToString:currentPath]) {
+            NSBeep();
+            [self.statusBar showInfoMessage:[NSString stringWithFormat:@"该位置来自 %@ 第 %ld 行（当前未打开）",
+                                             targetPath.lastPathComponent, (long)res.sourceLine]];
+            return;
+        }
     }
+
+    [self.editorTextView jumpToLine:res.sourceLine column:res.sourceColumn];
+    [self.window makeFirstResponder:self.editorTextView];
 }
 
 #pragma mark - TMEditorTextViewDelegate & NSTextDelegate

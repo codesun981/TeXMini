@@ -27,36 +27,46 @@
 }
 
 - (void)loadPDFFromURL:(NSURL *)url {
-    self.currentPDFURL = url;
-    PDFDocument *doc = [[PDFDocument alloc] initWithURL:url];
-    if (doc) {
-        self.document = doc;
-    }
+    [self loadPDFFromURL:url preservingViewport:NO];
 }
 
-- (void)reloadPreservingViewport {
-    if (!self.currentPDFURL) return;
+- (void)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve {
+    PDFDocument *newDoc = [[PDFDocument alloc] initWithURL:url];
+    if (!newDoc) return;
 
-    PDFPage *currentPage = self.currentPage;
-    NSInteger pageIndex = currentPage ? [self.document indexForPage:currentPage] : 0;
-    NSPoint scrollPoint = NSZeroPoint;
-    NSScrollView *scrollView = self.enclosingScrollView;
-    if (scrollView) {
-        scrollPoint = scrollView.contentView.bounds.origin;
+    self.currentPDFURL = url;
+
+    if (!preserve || !self.document) {
+        self.document = newDoc;
+        return;
     }
 
-    PDFDocument *newDoc = [[PDFDocument alloc] initWithURL:self.currentPDFURL];
-    if (!newDoc) return;
+    // 记录旧视口：当前页索引 + 滚动偏移，必须在替换 document 之前取。
+    PDFPage *currentPage = self.currentPage;
+    NSInteger pageIndex = currentPage ? [self.document indexForPage:currentPage] : 0;
+    NSScrollView *scrollView = self.enclosingScrollView;
+    NSPoint scrollPoint = scrollView ? scrollView.contentView.bounds.origin : NSZeroPoint;
+    CGFloat scale = self.scaleFactor;
+    BOOL wasAutoScaling = self.autoScales;
 
     self.document = newDoc;
 
-    if (pageIndex < (NSInteger)self.document.pageCount) {
-        PDFPage *targetPage = [self.document pageAtIndex:pageIndex];
-        [self goToPage:targetPage];
-    }
-    if (scrollView) {
-        [scrollView.contentView scrollPoint:scrollPoint];
-    }
+    void (^restore)(void) = ^{
+        if (!wasAutoScaling) {
+            self.autoScales = NO;
+            self.scaleFactor = scale;
+        }
+        if (pageIndex < (NSInteger)self.document.pageCount) {
+            [self goToPage:[self.document pageAtIndex:pageIndex]];
+        }
+        if (scrollView) {
+            [scrollView.contentView scrollPoint:scrollPoint];
+            [scrollView reflectScrolledClipView:scrollView.contentView];
+        }
+    };
+    restore();
+    // PDFView 替换文档后会异步重新布局并回到首页，下一轮 runloop 再恢复一次。
+    dispatch_async(dispatch_get_main_queue(), restore);
 }
 
 - (void)mouseDown:(NSEvent *)event {

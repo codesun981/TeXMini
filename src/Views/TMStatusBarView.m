@@ -135,6 +135,12 @@
     _errorButton.hidden = YES;
 }
 
+- (void)showInfoMessage:(NSString *)message {
+    [_spinner stopAnimation:nil];
+    _statusLabel.stringValue = message;
+    _statusLabel.textColor = [NSColor secondaryLabelColor];
+}
+
 - (void)setSelectedEngine:(TMTeXEngine)engine {
     [_enginePopup selectItemAtIndex:(NSInteger)engine];
 }

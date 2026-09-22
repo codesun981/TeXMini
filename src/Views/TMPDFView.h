@@ -16,8 +16,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) NSURL *currentPDFURL;
 
 - (void)setupPDFView;
-- (void)reloadPreservingViewport;
 - (void)loadPDFFromURL:(NSURL *)url;
+/// preserve=YES 时保留当前页与滚动位置（用于重新编译后刷新）。
+- (void)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve;
 - (void)flashHighlightRect:(NSRect)pageRect onPageAtIndex:(NSInteger)pageIndex;
 
 @end
