@@ -508,7 +508,10 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 #pragma mark - NSWindowDelegate
 
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    return [self confirmDiscardChangesWithTitle:@"关闭窗口前是否保存更改？"];
+    if (![self confirmDiscardChangesWithTitle:@"关闭窗口前是否保存更改？"]) return NO;
+    // 用户已决定（保存或放弃），避免随后的 applicationShouldTerminate 再问一次
+    self.documentModel.isDirty = NO;
+    return YES;
 }
 
 #pragma mark - 编译动作与回调
