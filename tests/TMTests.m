@@ -7,6 +7,7 @@
 #import "TMLogParser.h"
 #import "TMRecentFiles.h"
 #import "TMProject.h"
+#import "TMCompletionProvider.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -290,6 +291,97 @@ TM_TEST(test_project_file_tree_filters_aux_build_and_twin_pdf) {
     TM_ASSERT_EQ_STR([names componentsJoinedByString:@","], @"chapters,figure.pdf,main.tex,notes.tex,refs.bib");
     TM_ASSERT_TRUE(tree[0].isDirectory);
     TM_ASSERT_EQ_INT(tree[0].children.count, 2);
+    [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+#pragma mark - TMCompletionProvider
+
+TM_TEST(test_completion_context_cite_partial_after_comma) {
+    NSString *text = @"see \\cite{knuth84, lam";
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:text cursorLocation:text.length];
+    TM_ASSERT_EQ_INT(ctx.kind, TMCompletionKindCitation);
+    TM_ASSERT_EQ_STR(ctx.partial, @"lam");
+    TM_ASSERT_EQ_INT(ctx.partialRange.location, text.length - 3);
+}
+
+TM_TEST(test_completion_context_ref_with_optional_arg_and_empty_partial) {
+    NSString *text = @"\\autoref{}";
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:text cursorLocation:9]; // 在 { 与 } 之间
+    TM_ASSERT_EQ_INT(ctx.kind, TMCompletionKindReference);
+    TM_ASSERT_EQ_STR(ctx.partial, @"");
+    NSString *t2 = @"\\cref[opt]{fig:";
+    ctx = [TMCompletionProvider contextInText:t2 cursorLocation:t2.length];
+    TM_ASSERT_EQ_INT(ctx.kind, TMCompletionKindReference);
+    TM_ASSERT_EQ_STR(ctx.partial, @"fig:");
+}
+
+TM_TEST(test_completion_context_begin_and_command) {
+    NSString *text = @"  \\begin{ite";
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:text cursorLocation:text.length];
+    TM_ASSERT_EQ_INT(ctx.kind, TMCompletionKindEnvironment);
+    TM_ASSERT_EQ_STR(ctx.partial, @"ite");
+
+    NSString *cmd = @"hello \\sec";
+    ctx = [TMCompletionProvider contextInText:cmd cursorLocation:cmd.length];
+    TM_ASSERT_EQ_INT(ctx.kind, TMCompletionKindCommand);
+    TM_ASSERT_EQ_STR(ctx.partial, @"\\sec");
+    TM_ASSERT_EQ_INT(ctx.partialRange.location, 6);
+
+    // 普通单词、转义反斜杠、非补全命令的参数 → None
+    NSString *plain = @"hello wor";
+    TM_ASSERT_EQ_INT([TMCompletionProvider contextInText:plain cursorLocation:plain.length].kind, TMCompletionKindNone);
+    NSString *tb = @"\\textbf{bo";
+    TM_ASSERT_EQ_INT([TMCompletionProvider contextInText:tb cursorLocation:tb.length].kind, TMCompletionKindNone);
+}
+
+TM_TEST(test_completion_scanners) {
+    NSArray *labels = [TMCompletionProvider labelsInText:@"\\label{sec:intro} text \\label{ eq:main } \\label{sec:intro}"];
+    TM_ASSERT_EQ_STR([labels componentsJoinedByString:@","], @"sec:intro,eq:main");
+
+    NSArray *keys = [TMCompletionProvider citationKeysInBibText:
+                     @"@comment{ignored,}\n@Article{knuth84,\n title={x}}\n@book( lamport94 , title={y})\n@string{foo = \"bar\"}"];
+    TM_ASSERT_EQ_STR([keys componentsJoinedByString:@","], @"knuth84,lamport94");
+
+    NSArray *envs = [TMCompletionProvider environmentsInText:@"\\begin{align*} \\begin{itemize}"];
+    TM_ASSERT_EQ_STR([envs componentsJoinedByString:@","], @"align*,itemize");
+
+    NSArray *cmds = [TMCompletionProvider commandsInText:@"\\newcommand{\\myvec}[1]{..} \\section{a} \\a"];
+    TM_ASSERT_TRUE([cmds containsObject:@"myvec"]);
+    TM_ASSERT_TRUE([cmds containsObject:@"section"]);
+    TM_ASSERT_TRUE(![cmds containsObject:@"a"]);
+}
+
+TM_TEST(test_completion_candidates_filter_and_prefix_first) {
+    TMCompletionProvider *p = [[TMCompletionProvider alloc] init]; // 无项目目录
+    NSString *doc = @"\\label{fig:setup}\\label{sec:figures}\\label{tab:data}";
+    TMCompletionContext *ctx = [[TMCompletionContext alloc] init];
+    ctx.kind = TMCompletionKindReference;
+    ctx.partial = @"fig";
+    NSArray *out = [p completionsForContext:ctx currentText:doc];
+    TM_ASSERT_EQ_STR([out componentsJoinedByString:@","], @"fig:setup,sec:figures");
+
+    ctx.kind = TMCompletionKindCommand;
+    ctx.partial = @"\\sec";
+    out = [p completionsForContext:ctx currentText:@""];
+    TM_ASSERT_TRUE(out.count >= 1);
+    TM_ASSERT_TRUE([out[0] hasPrefix:@"\\sec"]);
+
+    ctx.kind = TMCompletionKindEnvironment;
+    ctx.partial = @"ali";
+    out = [p completionsForContext:ctx currentText:@""];
+    TM_ASSERT_EQ_STR([out componentsJoinedByString:@","], @"align,align*");
+}
+
+TM_TEST(test_completion_scans_project_bib_and_labels) {
+    NSURL *root = tm_makeTempProject();
+    [@"\\label{ch:intro}" writeToURL:[root URLByAppendingPathComponent:@"chapters/intro.tex"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    TMCompletionProvider *p = [[TMCompletionProvider alloc] init];
+    p.projectRootURL = root;
+    TMCompletionContext *ctx = [[TMCompletionContext alloc] init];
+    ctx.kind = TMCompletionKindCitation; ctx.partial = @"";
+    TM_ASSERT_EQ_STR([[p completionsForContext:ctx currentText:@""] componentsJoinedByString:@","], @"a");
+    ctx.kind = TMCompletionKindReference; ctx.partial = @"ch";
+    TM_ASSERT_EQ_STR([[p completionsForContext:ctx currentText:@""] componentsJoinedByString:@","], @"ch:intro");
     [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
 }
 

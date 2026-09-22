@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import "TMCompletionProvider.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -10,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface TMEditorTextView : NSTextView
 
 @property (nonatomic, weak) id<TMEditorTextViewDelegate> editorDelegate;
+/// 提供 \cite / \ref / \begin / 命令 的候选；为 nil 时退回系统单词补全。
+@property (nonatomic, strong, nullable) TMCompletionProvider *completionProvider;
 
 - (void)setupEditor;
 - (void)jumpToLine:(NSInteger)lineNumber column:(NSInteger)column;

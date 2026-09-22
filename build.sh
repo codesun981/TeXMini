@@ -35,6 +35,8 @@ clang -fobjc-arc -O2 \
     src/Services/TMLogParser.m \
     src/Services/TMRecentFiles.m \
     src/Services/TMProject.m \
+    src/Services/TMCompletionProvider.m \
+    src/Services/TMFileWatcher.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
     src/Views/TMEditorTextView.m \

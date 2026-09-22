@@ -10,6 +10,7 @@
 #import "TMOutlineParser.h"
 #import "TMRecentFiles.h"
 #import "TMProject.h"
+#import "TMFileWatcher.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kTMDefaultsEngine = @"TMEngine";
@@ -39,6 +40,11 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
+@property (nonatomic, strong) TMCompletionProvider *completionProvider;
+@property (nonatomic, strong, nullable) TMFileWatcher *fileWatcher;
+/// 上次我们自己读 / 写磁盘文件时的修改时间，用来判断是否有外部改动。
+@property (nonatomic, strong, nullable) NSDate *knownModificationDate;
+@property (nonatomic, assign) BOOL isShowingExternalChangeAlert;
 
 @end
 
@@ -152,6 +158,8 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     _editorTextView.textContainer.widthTracksTextView = YES;
     _editorTextView.editorDelegate = self;
     _editorTextView.delegate = self;
+    _completionProvider = [[TMCompletionProvider alloc] init];
+    _editorTextView.completionProvider = _completionProvider;
     [_editorTextView setupEditor];
 
     _editorScrollView.documentView = _editorTextView;
@@ -350,6 +358,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [self scheduleOutlineUpdateImmediate:YES];
         [self refreshWindowTitle];
         [self syncProjectRootWithDocument];
+        [self startWatchingCurrentFile];
         // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
         [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
     }
@@ -385,7 +394,102 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 - (void)setProjectRootURL:(nullable NSURL *)url reload:(BOOL)reload {
     self.projectRootURL = url.URLByStandardizingPath;
+    self.completionProvider.projectRootURL = self.projectRootURL;
+    [self.completionProvider invalidate];
     if (reload) [self.outlineSidebarView.fileBrowserView setRootDirectoryURL:self.projectRootURL];
+}
+
+#pragma mark - 外部修改检测
+
+- (nullable NSDate *)modificationDateOfCurrentFile {
+    NSURL *url = self.documentModel.fileURL;
+    if (!url || self.documentModel.isScratch) return nil;
+    NSDate *date = nil;
+    [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
+    return date;
+}
+
+- (void)rememberCurrentFileModificationDate {
+    // 清掉 URL 资源缓存，否则可能拿到旧值
+    [self.documentModel.fileURL removeCachedResourceValueForKey:NSURLContentModificationDateKey];
+    self.knownModificationDate = [self modificationDateOfCurrentFile];
+}
+
+- (void)startWatchingCurrentFile {
+    [self.fileWatcher stop];
+    self.fileWatcher = nil;
+    [self rememberCurrentFileModificationDate];
+    NSURL *url = self.documentModel.fileURL;
+    if (!url || self.documentModel.isScratch) return;
+    __weak typeof(self) weakSelf = self;
+    self.fileWatcher = [[TMFileWatcher alloc] initWithFileURL:url handler:^{
+        [weakSelf checkForExternalModification];
+    }];
+}
+
+- (void)checkForExternalModification {
+    if (self.isShowingExternalChangeAlert) return;
+    NSURL *url = self.documentModel.fileURL;
+    if (!url || self.documentModel.isScratch) return;
+    [url removeCachedResourceValueForKey:NSURLContentModificationDateKey];
+    NSDate *onDisk = [self modificationDateOfCurrentFile];
+    if (!onDisk) return; // 被删除 / 移动：保留编辑器内容，用户保存时会重新写出
+    if (self.knownModificationDate && [onDisk compare:self.knownModificationDate] != NSOrderedDescending) return;
+
+    NSString *diskContent = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
+    if (!diskContent) return;
+    if ([diskContent isEqualToString:self.editorTextView.string]) {
+        // 内容相同（比如 git checkout 回同一版本），只更新时间戳
+        self.knownModificationDate = onDisk;
+        return;
+    }
+
+    if (!self.documentModel.isDirty) {
+        [self reloadDocumentFromDiskWithContent:diskContent modificationDate:onDisk];
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"%@ 已在磁盘上更新，已重新载入", url.lastPathComponent]];
+        return;
+    }
+
+    self.isShowingExternalChangeAlert = YES;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"文件已在磁盘上被修改";
+    alert.informativeText = [NSString stringWithFormat:@"“%@” 被其他程序修改，而编辑器里也有未保存的更改。\n\n重新载入会丢弃编辑器里的更改；保留则下次保存会覆盖磁盘上的版本。", url.lastPathComponent];
+    [alert addButtonWithTitle:@"重新载入"];
+    [alert addButtonWithTitle:@"保留我的更改"];
+    NSModalResponse response = [alert runModal];
+    self.isShowingExternalChangeAlert = NO;
+    if (response == NSAlertFirstButtonReturn) {
+        [self reloadDocumentFromDiskWithContent:diskContent modificationDate:onDisk];
+    } else {
+        self.knownModificationDate = onDisk; // 不再为同一次改动重复提醒
+    }
+}
+
+/// 用磁盘内容替换编辑器文本，尽量保住光标与滚动位置。
+- (void)reloadDocumentFromDiskWithContent:(NSString *)content modificationDate:(NSDate *)date {
+    NSRange sel = self.editorTextView.selectedRange;
+    NSRect visible = self.editorScrollView.contentView.bounds;
+
+    self.documentModel.content = content;
+    self.documentModel.isDirty = NO;
+    self.editorTextView.string = content;
+    [self.editorTextView.undoManager removeAllActions];
+    [self.editorTextView rehighlightAll];
+
+    NSUInteger loc = MIN(sel.location, content.length);
+    [self.editorTextView setSelectedRange:NSMakeRange(loc, 0)];
+    [self.editorScrollView.contentView scrollToPoint:visible.origin];
+    [self.editorScrollView reflectScrolledClipView:self.editorScrollView.contentView];
+
+    self.knownModificationDate = date;
+    [self refreshWindowTitle];
+    [self scheduleOutlineUpdateImmediate:YES];
+    [self.completionProvider invalidate];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    // 切回来时立刻检查一次；vnode 事件偶尔会丢（例如网络盘）
+    [self checkForExternalModification];
 }
 
 - (void)openFolderAtURL:(NSURL *)folderURL {
@@ -508,6 +612,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [[NSAlert alertWithError:err] runModal];
         return NO;
     }
+    [self didWriteCurrentFile];
     [self refreshWindowTitle];
     return YES;
 }
@@ -534,6 +639,8 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     [self refreshWindowTitle];
     [TMRecentFiles noteFileURL:panel.URL];
     [self syncProjectRootWithDocument];
+    [self startWatchingCurrentFile];
+    [self.completionProvider invalidate];
     // 换了目录后旧的 PDF 不再对应，重新判断预览
     [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
     return YES;
@@ -605,11 +712,18 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [self.documentModel saveScratchToURL:tmpURL error:nil];
     } else {
         [self.documentModel saveCurrentFileWithError:nil];
+        [self didWriteCurrentFile];
         [self refreshWindowTitle];
     }
 
     [self.logDrawer clearLog];
     [[TMCompiler sharedCompiler] compileFileAtURL:[self mainFileURLForCompile]];
+}
+
+/// 我们自己写完磁盘后调用：记住新的修改时间（避免误报外部修改），并让补全重新扫描。
+- (void)didWriteCurrentFile {
+    [self rememberCurrentFileModificationDate];
+    [self.completionProvider invalidate];
 }
 
 - (void)cancelCompilation {

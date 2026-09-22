@@ -224,6 +224,8 @@ static unichar TMMatchingBracket(unichar c) {
             if (after.location > 0) {
                 [self setSelectedRange:NSMakeRange(after.location - 1, 0)];
             }
+            // \cite{ \ref{ \begin{ 之后自动弹出候选
+            if ([str isEqualToString:@"{"]) [self triggerArgumentCompletionIfNeeded];
             return;
         }
 
@@ -297,7 +299,69 @@ static unichar TMMatchingBracket(unichar c) {
         [self insertText:kTMIndentUnit replacementRange:self.selectedRange];
         return;
     }
+    // ⌃Space：手动触发补全（系统默认的 Esc / F5 依然可用）
+    if (event.keyCode == 49 && (event.modifierFlags & NSEventModifierFlagControl)) {
+        [self complete:nil];
+        return;
+    }
     [super keyDown:event];
+}
+
+#pragma mark - 补全
+
+- (void)triggerArgumentCompletionIfNeeded {
+    if (!self.completionProvider) return;
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
+    if (ctx.kind == TMCompletionKindCitation || ctx.kind == TMCompletionKindReference || ctx.kind == TMCompletionKindEnvironment) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self complete:nil];
+        });
+    }
+}
+
+- (NSRange)rangeForUserCompletion {
+    if (self.completionProvider) {
+        TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
+        if (ctx.kind != TMCompletionKindNone) return ctx.partialRange;
+    }
+    return [super rangeForUserCompletion];
+}
+
+- (NSArray<NSString *> *)completionsForPartialWordRange:(NSRange)charRange indexOfSelectedItem:(NSInteger *)index {
+    if (self.completionProvider) {
+        TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:NSMaxRange(charRange)];
+        if (ctx.kind != TMCompletionKindNone) {
+            if (index) *index = 0;
+            return [self.completionProvider completionsForContext:ctx currentText:self.string];
+        }
+    }
+    return [super completionsForPartialWordRange:charRange indexOfSelectedItem:index];
+}
+
+- (void)insertCompletion:(NSString *)word forPartialWordRange:(NSRange)charRange movement:(NSInteger)movement isFinal:(BOOL)flag {
+    [super insertCompletion:word forPartialWordRange:charRange movement:movement isFinal:flag];
+    if (!flag || !self.completionProvider) return;
+    // 选定 \begin{env} 后，若下一行还没有 \end{env}，顺手补上，并把光标停在环境体内
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:charRange.location];
+    if (ctx.kind != TMCompletionKindEnvironment) return;
+    NSString *full = self.string;
+    NSRange lineRange = [full lineRangeForRange:NSMakeRange(charRange.location, 0)];
+    NSString *line = [full substringWithRange:lineRange];
+    if ([line containsString:@"\\end{"]) return;
+    NSString *env = [TMEditActions environmentToCloseInLine:line];
+    if (!env || ![env isEqualToString:word]) return;
+    if (![self shouldAutoCloseEnvironment:env afterLineRange:lineRange]) return;
+
+    // 跳过紧随的 “}”，在行尾插入 换行 + 缩进 + \end{env}
+    NSString *indent = [TMEditActions leadingWhitespaceOfLine:line];
+    NSUInteger lineEnd = NSMaxRange(lineRange);
+    if (lineEnd > lineRange.location && [full characterAtIndex:lineEnd - 1] == '\n') lineEnd--;
+    NSString *block = [NSString stringWithFormat:@"\n%@%@\n%@\\end{%@}", indent, kTMIndentUnit, indent, env];
+    NSRange insertAt = NSMakeRange(lineEnd, 0);
+    if (![self shouldChangeTextInRange:insertAt replacementString:block]) return;
+    [self.textStorage replaceCharactersInRange:insertAt withString:block];
+    [self didChangeText];
+    [self setSelectedRange:NSMakeRange(lineEnd + 1 + indent.length + kTMIndentUnit.length, 0)];
 }
 
 - (void)insertBacktab:(id)sender {
