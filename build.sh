@@ -17,25 +17,33 @@ clang -fobjc-arc -O2 \
     -framework PDFKit \
     -framework UniformTypeIdentifiers \
     -lz \
-    -ISources/CSynctex \
+    -Ivendor/synctex \
     -Isrc \
     -Isrc/Models \
     -Isrc/Services \
     -Isrc/Views \
     -Isrc/Controllers \
-    Sources/CSynctex/synctex_parser.c \
-    Sources/CSynctex/synctex_parser_utils.c \
+    vendor/synctex/synctex_parser.c \
+    vendor/synctex/synctex_parser_utils.c \
     src/Models/TMDocument.m \
     src/Models/TMOutlineItem.m \
     src/Services/TMCompiler.m \
     src/Services/TMSyncTeX.m \
     src/Services/TMOutlineParser.m \
+    src/Services/TMEditActions.m \
+    src/Services/TMMagicComments.m \
+    src/Services/TMLogParser.m \
+    src/Services/TMRecentFiles.m \
+    src/Services/TMProject.m \
+    src/Services/TMCompletionProvider.m \
+    src/Services/TMFileWatcher.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
     src/Views/TMEditorTextView.m \
     src/Views/TMPDFView.m \
     src/Views/TMStatusBarView.m \
     src/Views/TMLogDrawerView.m \
+    src/Views/TMFileBrowserView.m \
     src/Views/TMOutlineSidebarView.m \
     src/Controllers/TMMainWindowController.m \
     src/AppDelegate.m \

@@ -8,12 +8,22 @@
 #import "TMSyncTeX.h"
 #import "TMOutlineSidebarView.h"
 #import "TMOutlineParser.h"
+#import "TMRecentFiles.h"
+#import "TMProject.h"
+#import "TMFileWatcher.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate>
+static NSString *const kTMDefaultsEngine = @"TMEngine";
+static NSString *const kTMDefaultsFontSize = @"TMEditorFontSize";
+static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
-@property (nonatomic, strong) NSSplitView *mainSplitView;
+@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate>
+
+// 外层：系统 NSSplitViewController 负责侧边栏折叠、分割线隐藏、宽度记忆
+@property (nonatomic, strong) NSSplitViewController *mainSplitViewController;
+@property (nonatomic, strong) NSSplitViewItem *sidebarItem;
 @property (nonatomic, strong) TMOutlineSidebarView *outlineSidebarView;
+// 内层：代码 | PDF
 @property (nonatomic, strong) NSSplitView *splitView;
 @property (nonatomic, strong) TMEditorTextView *editorTextView;
 @property (nonatomic, strong) NSScrollView *editorScrollView;
@@ -26,8 +36,15 @@
 @property (nonatomic, assign) NSInteger currentCursorLine;
 @property (nonatomic, assign) NSInteger currentCursorCol;
 @property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
-@property (nonatomic, assign) CGFloat lastOutlineWidth;
-@property (nonatomic, assign) BOOL isOutlineCollapsed;
+@property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
+@property (nonatomic, assign) BOOL needsCompileAfterCurrent;
+@property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
+@property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
+@property (nonatomic, strong) TMCompletionProvider *completionProvider;
+@property (nonatomic, strong, nullable) TMFileWatcher *fileWatcher;
+/// 上次我们自己读 / 写磁盘文件时的修改时间，用来判断是否有外部改动。
+@property (nonatomic, strong, nullable) NSDate *knownModificationDate;
+@property (nonatomic, assign) BOOL isShowingExternalChangeAlert;
 
 @end
 
@@ -50,23 +67,31 @@
 
     self = [super initWithWindow:window];
     if (self) {
+        NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
         _documentModel = document ?: [TMDocument documentWithDefaultTemplate];
         _currentCursorLine = 1;
         _currentCursorCol = 1;
-        _lastOutlineWidth = 220.0;
-        _isOutlineCollapsed = NO;
+        _autoCompileEnabled = [defaults boolForKey:@"TMAutoCompile"];
         window.delegate = self;
 
         [self setupUI];
         [self setupToolbar];
         [TMCompiler sharedCompiler].delegate = self;
+        [self restorePersistedPreferences];
         [self loadDocumentIntoEditor];
 
-        // 首次打开未命名欢迎模板时，自动保存至临时缓存并触发初次编译，让用户第一眼看到分栏预览！
+        // 侧边栏折叠状态：等 UI 建好后再应用，避免动画
+        self.sidebarItem.collapsed = [defaults boolForKey:kTMDefaultsOutlineCollapsed];
+
+        // 窗口位置/大小交给系统自动保存
+        [window setFrameAutosaveName:@"TMMainWindow"];
+
+        // 首次打开未命名欢迎模板时，暂存到临时目录并触发初次编译，让用户第一眼看到分栏预览。
+        // 注意用 saveScratchToURL: 而非 saveToURL:，否则之后 ⌘S 会静默写回 /tmp。
         if (!_documentModel.fileURL) {
             NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Welcome.tex"];
             NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-            [_documentModel saveToURL:tmpURL error:nil];
+            [_documentModel saveScratchToURL:tmpURL error:nil];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self compileCurrentDocument];
             });
@@ -80,27 +105,35 @@
     contentView.wantsLayer = YES;
     NSRect bounds = contentView.bounds;
 
-    _lastOutlineWidth = 220.0;
-
-    // 1. 外层水平分栏 (MainSplitView: 左大纲侧边栏 + 右工作区分栏)
-    _mainSplitView = [[NSSplitView alloc] initWithFrame:bounds];
-    _mainSplitView.vertical = YES;
-    _mainSplitView.dividerStyle = NSSplitViewDividerStyleThin;
-    _mainSplitView.delegate = self;
-    _mainSplitView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:_mainSplitView];
+    // 1. 外层分栏交给 NSSplitViewController：左大纲侧边栏 + 右工作区
+    _mainSplitViewController = [[NSSplitViewController alloc] init];
+    _mainSplitViewController.splitView.vertical = YES;
+    _mainSplitViewController.splitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _mainSplitViewController.splitView.autosaveName = @"TMMainSplit";
+    _mainSplitViewController.view.translatesAutoresizingMaskIntoConstraints = NO;
 
     // 1.1 大纲侧边栏
-    _outlineSidebarView = [[TMOutlineSidebarView alloc] initWithFrame:NSMakeRect(0, 0, _lastOutlineWidth, bounds.size.height)];
+    CGFloat sidebarWidth = 220.0;
+    _outlineSidebarView = [[TMOutlineSidebarView alloc] initWithFrame:NSMakeRect(0, 0, sidebarWidth, bounds.size.height)];
     _outlineSidebarView.delegate = self;
-    [_mainSplitView addSubview:_outlineSidebarView];
+    _outlineSidebarView.fileBrowserView.delegate = self;
+    NSViewController *sidebarVC = [[NSViewController alloc] init];
+    sidebarVC.view = _outlineSidebarView;
+    _sidebarItem = [NSSplitViewItem sidebarWithViewController:sidebarVC];
+    _sidebarItem.minimumThickness = 160.0;
+    _sidebarItem.maximumThickness = 380.0;
+    _sidebarItem.canCollapse = YES;
+    _sidebarItem.collapseBehavior = NSSplitViewItemCollapseBehaviorPreferResizingSplitViewWithFixedSiblings;
+    _sidebarItem.holdingPriority = NSLayoutPriorityDefaultHigh;
+    [_mainSplitViewController addSplitViewItem:_sidebarItem];
 
     // 1.2 内层工作区分栏 (ContentSplitView: 代码编辑 + PDF 预览)
-    CGFloat contentWidth = MAX(400, bounds.size.width - _lastOutlineWidth - 1.0);
-    _splitView = [[NSSplitView alloc] initWithFrame:NSMakeRect(_lastOutlineWidth + 1.0, 0, contentWidth, bounds.size.height)];
+    CGFloat contentWidth = MAX(400, bounds.size.width - sidebarWidth - 1.0);
+    _splitView = [[NSSplitView alloc] initWithFrame:NSMakeRect(0, 0, contentWidth, bounds.size.height)];
     _splitView.vertical = YES;
     _splitView.dividerStyle = NSSplitViewDividerStyleThin;
     _splitView.delegate = self;
+    _splitView.autosaveName = @"TMContentSplit";
     _splitView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
 
     CGFloat halfWidth = floor((contentWidth - 1.0) / 2.0);
@@ -125,6 +158,8 @@
     _editorTextView.textContainer.widthTracksTextView = YES;
     _editorTextView.editorDelegate = self;
     _editorTextView.delegate = self;
+    _completionProvider = [[TMCompletionProvider alloc] init];
+    _editorTextView.completionProvider = _completionProvider;
     [_editorTextView setupEditor];
 
     _editorScrollView.documentView = _editorTextView;
@@ -146,18 +181,25 @@
     _pdfView.syncDelegate = self;
     [_pdfContainerView addSubview:_pdfView];
 
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(pdfPageDidChange:) name:PDFViewPageChangedNotification object:_pdfView];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(pdfPageDidChange:) name:PDFViewDocumentChangedNotification object:_pdfView];
+
     // 占位视图 (当未编译出 PDF 时显示提示)
     [self setupPlaceholderView];
     [_pdfContainerView addSubview:_pdfPlaceholderView];
 
     [_splitView addSubview:_pdfContainerView];
 
-    // 将工作区分栏加入外层主分栏
-    [_mainSplitView addSubview:_splitView];
+    // 将工作区分栏包成 NSSplitViewItem 加入外层
+    NSViewController *contentVC = [[NSViewController alloc] init];
+    contentVC.view = _splitView;
+    NSSplitViewItem *contentItem = [NSSplitViewItem splitViewItemWithViewController:contentVC];
+    contentItem.minimumThickness = 400.0;
+    contentItem.holdingPriority = NSLayoutPriorityDefaultLow;
+    [_mainSplitViewController addSplitViewItem:contentItem];
 
-    // 设置侧边栏固定倾向、工作区拉伸倾向
-    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultHigh forSubviewAtIndex:0];
-    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
+    NSView *mainSplitView = _mainSplitViewController.view;
+    [contentView addSubview:mainSplitView];
 
     // 2. 抽屉式日志视图
     _logDrawer = [[TMLogDrawerView alloc] init];
@@ -172,10 +214,10 @@
 
     // 自动布局约束
     [NSLayoutConstraint activateConstraints:@[
-        [_mainSplitView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
-        [_mainSplitView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
-        [_mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
-        [_mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
+        [mainSplitView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
+        [mainSplitView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
 
         [_logDrawer.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
         [_logDrawer.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
@@ -186,9 +228,6 @@
         [_statusBar.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
         [_statusBar.heightAnchor constraintEqualToConstant:28]
     ]];
-
-    // 初始均分左右分栏与大纲侧边栏
-    [self layoutMainSplitView];
 }
 
 - (void)setupPlaceholderView {
@@ -247,97 +286,65 @@
     self.window.toolbarStyle = NSWindowToolbarStyleUnified;
 }
 
-#pragma mark - NSSplitView 分栏布局与控制
+#pragma mark - 偏好持久化
 
-- (void)layoutMainSplitView {
-    NSRect bounds = self.mainSplitView.bounds;
-    if (bounds.size.width <= 0 || bounds.size.height <= 0) return;
+- (void)restorePersistedPreferences {
+    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
 
-    CGFloat d = self.mainSplitView.dividerThickness;
-
-    if (self.isOutlineCollapsed) {
-        self.outlineSidebarView.hidden = YES;
-        self.outlineSidebarView.frame = NSMakeRect(0, 0, 0, bounds.size.height);
-        self.splitView.frame = bounds;
-    } else {
-        self.outlineSidebarView.hidden = NO;
-        CGFloat sidebarW = self.lastOutlineWidth;
-        if (sidebarW < 160.0 || sidebarW > 380.0) {
-            sidebarW = 220.0;
+    if ([defaults objectForKey:kTMDefaultsEngine]) {
+        NSInteger engine = [defaults integerForKey:kTMDefaultsEngine];
+        if (engine >= TMTeXEngineLatexmk && engine <= TMTeXEnginePDFLaTeX) {
+            [TMCompiler sharedCompiler].engine = (TMTeXEngine)engine;
+            [self.statusBar setSelectedEngine:(TMTeXEngine)engine];
         }
-        if (bounds.size.width > 600.0) {
-            sidebarW = MIN(sidebarW, bounds.size.width - 400.0);
-        }
-        CGFloat contentW = MAX(0, bounds.size.width - sidebarW - d);
-
-        self.outlineSidebarView.frame = NSMakeRect(0, 0, sidebarW, bounds.size.height);
-        self.splitView.frame = NSMakeRect(sidebarW + d, 0, contentW, bounds.size.height);
     }
-    [self.splitView adjustSubviews];
+
+    CGFloat fontSize = [defaults doubleForKey:kTMDefaultsFontSize];
+    if (fontSize >= 9.0 && fontSize <= 30.0) {
+        self.editorTextView.editorFontSize = fontSize;
+    }
 }
 
-#pragma mark - NSSplitViewDelegate (保证分栏永不塌陷、主侧边栏可折叠)
+- (void)persistEditorFontSize {
+    [[NSUserDefaults standardUserDefaults] setDouble:self.editorTextView.editorFontSize forKey:kTMDefaultsFontSize];
+}
+
+#pragma mark - NSSplitViewDelegate (内层 代码|PDF 分栏，保证永不塌陷)
 
 - (BOOL)splitView:(NSSplitView *)splitView canCollapseSubview:(NSView *)subview {
     return NO;
 }
 
-- (BOOL)splitView:(NSSplitView *)splitView shouldHideDividerAtIndex:(NSInteger)dividerIndex {
-    if (splitView == self.mainSplitView && dividerIndex == 0) {
-        return self.isOutlineCollapsed || self.outlineSidebarView.isHidden || self.outlineSidebarView.frame.size.width <= 0;
-    }
-    return NO;
-}
-
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMinCoordinate:(CGFloat)proposedMinimumPosition ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == self.mainSplitView) {
-        return 160.0;
-    }
     return 280.0;
 }
 
 - (CGFloat)splitView:(NSSplitView *)splitView constrainMaxCoordinate:(CGFloat)proposedMaximumPosition ofSubviewAt:(NSInteger)dividerIndex {
-    if (splitView == self.mainSplitView) {
-        return 380.0;
-    }
     return splitView.bounds.size.width - 280.0;
 }
 
 - (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize {
-    if (splitView == self.mainSplitView) {
-        [self layoutMainSplitView];
-    } else if (splitView == self.splitView) {
-        NSRect bounds = splitView.bounds;
-        CGFloat d = splitView.dividerThickness;
-        if (splitView.subviews.count >= 2) {
-            NSView *leftView = splitView.subviews[0];
-            NSView *rightView = splitView.subviews[1];
+    NSRect bounds = splitView.bounds;
+    CGFloat d = splitView.dividerThickness;
+    if (splitView.subviews.count >= 2) {
+        NSView *leftView = splitView.subviews[0];
+        NSView *rightView = splitView.subviews[1];
 
-            CGFloat leftWidth = leftView.frame.size.width;
-            if (leftWidth < 200 || oldSize.width < 200) {
-                leftWidth = floor((bounds.size.width - d) * 0.5);
-            } else {
-                CGFloat ratio = leftWidth / (oldSize.width - d);
-                leftWidth = floor((bounds.size.width - d) * ratio);
-            }
-
-            leftWidth = MAX(280.0, MIN(leftWidth, bounds.size.width - d - 280.0));
-            CGFloat rightWidth = bounds.size.width - d - leftWidth;
-
-            leftView.frame = NSMakeRect(0, 0, leftWidth, bounds.size.height);
-            rightView.frame = NSMakeRect(leftWidth + d, 0, rightWidth, bounds.size.height);
+        CGFloat leftWidth = leftView.frame.size.width;
+        if (leftWidth < 200 || oldSize.width < 200) {
+            leftWidth = floor((bounds.size.width - d) * 0.5);
         } else {
-            [splitView adjustSubviews];
+            CGFloat ratio = leftWidth / (oldSize.width - d);
+            leftWidth = floor((bounds.size.width - d) * ratio);
         }
-    }
-}
 
-- (void)splitViewDidResizeSubviews:(NSNotification *)notification {
-    if (notification.object == self.mainSplitView && !self.isOutlineCollapsed) {
-        CGFloat w = self.outlineSidebarView.frame.size.width;
-        if (w >= 160.0 && w <= 380.0) {
-            self.lastOutlineWidth = w;
-        }
+        leftWidth = MAX(280.0, MIN(leftWidth, bounds.size.width - d - 280.0));
+        CGFloat rightWidth = bounds.size.width - d - leftWidth;
+
+        leftView.frame = NSMakeRect(0, 0, leftWidth, bounds.size.height);
+        rightView.frame = NSMakeRect(leftWidth + d, 0, rightWidth, bounds.size.height);
+    } else {
+        [splitView adjustSubviews];
     }
 }
 
@@ -346,54 +353,351 @@
 - (void)loadDocumentIntoEditor {
     if (self.documentModel) {
         self.editorTextView.string = self.documentModel.content ?: @"";
+        [self.editorTextView.undoManager removeAllActions];
         [self.editorTextView rehighlightAll];
         [self scheduleOutlineUpdateImmediate:YES];
-
-        NSString *fileName = self.documentModel.fileURL ? self.documentModel.fileURL.lastPathComponent : @"未命名文档.tex";
-        self.window.title = [NSString stringWithFormat:@"TeXMini - %@", fileName];
-
-        // 判断是否存在对应 PDF
-        if (self.documentModel.expectedPDFURL && [[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.expectedPDFURL.path]) {
-            [self.pdfView loadPDFFromURL:self.documentModel.expectedPDFURL];
-            self.pdfPlaceholderView.hidden = YES;
-        } else {
-            self.pdfPlaceholderView.hidden = NO;
-        }
+        [self refreshWindowTitle];
+        [self syncProjectRootWithDocument];
+        [self startWatchingCurrentFile];
+        // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
+        [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
     }
 }
 
+- (nullable NSURL *)expectedPDFURLForMainFile {
+    NSURL *main = [self mainFileURLForCompile];
+    if (!main) return nil;
+    NSString *base = main.lastPathComponent.stringByDeletingPathExtension;
+    return [main.URLByDeletingLastPathComponent URLByAppendingPathComponent:[base stringByAppendingPathExtension:@"pdf"]];
+}
+
+#pragma mark - 项目（文件夹）
+
+/// 文档有正式路径时，让文件浏览器的根目录覆盖它：若当前根已包含该文件则保持不变
+/// （在 chapters/ 里切换文件时不应把根跳到子目录），否则用文件所在目录。
+- (void)syncProjectRootWithDocument {
+    NSURL *fileURL = self.documentModel.fileURL;
+    if (!fileURL || self.documentModel.isScratch) {
+        [self.outlineSidebarView.fileBrowserView selectFileURL:nil];
+        return;
+    }
+    NSString *filePath = fileURL.URLByStandardizingPath.path;
+    NSString *rootPath = self.projectRootURL.URLByStandardizingPath.path;
+    BOOL inside = rootPath && [filePath hasPrefix:[rootPath stringByAppendingString:@"/"]];
+    if (!inside) {
+        [self setProjectRootURL:fileURL.URLByDeletingLastPathComponent reload:YES];
+    } else {
+        [self.outlineSidebarView.fileBrowserView reload];
+    }
+    [self.outlineSidebarView.fileBrowserView selectFileURL:fileURL];
+}
+
+- (void)setProjectRootURL:(nullable NSURL *)url reload:(BOOL)reload {
+    self.projectRootURL = url.URLByStandardizingPath;
+    self.completionProvider.projectRootURL = self.projectRootURL;
+    [self.completionProvider invalidate];
+    if (reload) [self.outlineSidebarView.fileBrowserView setRootDirectoryURL:self.projectRootURL];
+}
+
+#pragma mark - 外部修改检测
+
+- (nullable NSDate *)modificationDateOfCurrentFile {
+    NSURL *url = self.documentModel.fileURL;
+    if (!url || self.documentModel.isScratch) return nil;
+    NSDate *date = nil;
+    [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
+    return date;
+}
+
+- (void)rememberCurrentFileModificationDate {
+    // 清掉 URL 资源缓存，否则可能拿到旧值
+    [self.documentModel.fileURL removeCachedResourceValueForKey:NSURLContentModificationDateKey];
+    self.knownModificationDate = [self modificationDateOfCurrentFile];
+}
+
+- (void)startWatchingCurrentFile {
+    [self.fileWatcher stop];
+    self.fileWatcher = nil;
+    [self rememberCurrentFileModificationDate];
+    NSURL *url = self.documentModel.fileURL;
+    if (!url || self.documentModel.isScratch) return;
+    __weak typeof(self) weakSelf = self;
+    self.fileWatcher = [[TMFileWatcher alloc] initWithFileURL:url handler:^{
+        [weakSelf checkForExternalModification];
+    }];
+}
+
+- (void)checkForExternalModification {
+    if (self.isShowingExternalChangeAlert) return;
+    NSURL *url = self.documentModel.fileURL;
+    if (!url || self.documentModel.isScratch) return;
+    [url removeCachedResourceValueForKey:NSURLContentModificationDateKey];
+    NSDate *onDisk = [self modificationDateOfCurrentFile];
+    if (!onDisk) return; // 被删除 / 移动：保留编辑器内容，用户保存时会重新写出
+    if (self.knownModificationDate && [onDisk compare:self.knownModificationDate] != NSOrderedDescending) return;
+
+    NSString *diskContent = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
+    if (!diskContent) return;
+    if ([diskContent isEqualToString:self.editorTextView.string]) {
+        // 内容相同（比如 git checkout 回同一版本），只更新时间戳
+        self.knownModificationDate = onDisk;
+        return;
+    }
+
+    if (!self.documentModel.isDirty) {
+        [self reloadDocumentFromDiskWithContent:diskContent modificationDate:onDisk];
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"%@ 已在磁盘上更新，已重新载入", url.lastPathComponent]];
+        return;
+    }
+
+    self.isShowingExternalChangeAlert = YES;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"文件已在磁盘上被修改";
+    alert.informativeText = [NSString stringWithFormat:@"“%@” 被其他程序修改，而编辑器里也有未保存的更改。\n\n重新载入会丢弃编辑器里的更改；保留则下次保存会覆盖磁盘上的版本。", url.lastPathComponent];
+    [alert addButtonWithTitle:@"重新载入"];
+    [alert addButtonWithTitle:@"保留我的更改"];
+    NSModalResponse response = [alert runModal];
+    self.isShowingExternalChangeAlert = NO;
+    if (response == NSAlertFirstButtonReturn) {
+        [self reloadDocumentFromDiskWithContent:diskContent modificationDate:onDisk];
+    } else {
+        self.knownModificationDate = onDisk; // 不再为同一次改动重复提醒
+    }
+}
+
+/// 用磁盘内容替换编辑器文本，尽量保住光标与滚动位置。
+- (void)reloadDocumentFromDiskWithContent:(NSString *)content modificationDate:(NSDate *)date {
+    NSRange sel = self.editorTextView.selectedRange;
+    NSRect visible = self.editorScrollView.contentView.bounds;
+
+    self.documentModel.content = content;
+    self.documentModel.isDirty = NO;
+    self.editorTextView.string = content;
+    [self.editorTextView.undoManager removeAllActions];
+    [self.editorTextView rehighlightAll];
+
+    NSUInteger loc = MIN(sel.location, content.length);
+    [self.editorTextView setSelectedRange:NSMakeRange(loc, 0)];
+    [self.editorScrollView.contentView scrollToPoint:visible.origin];
+    [self.editorScrollView reflectScrolledClipView:self.editorScrollView.contentView];
+
+    self.knownModificationDate = date;
+    [self refreshWindowTitle];
+    [self scheduleOutlineUpdateImmediate:YES];
+    [self.completionProvider invalidate];
+}
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    // 切回来时立刻检查一次；vnode 事件偶尔会丢（例如网络盘）
+    [self checkForExternalModification];
+}
+
+- (void)openFolderAtURL:(NSURL *)folderURL {
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:folderURL.path isDirectory:&isDir] || !isDir) return;
+
+    [self setProjectRootURL:folderURL reload:YES];
+    self.outlineSidebarView.mode = TMSidebarModeFiles;
+    if (self.sidebarItem.isCollapsed) [self toggleOutlineSidebar];
+
+    NSURL *main = [TMProject guessMainFileInDirectory:folderURL];
+    if (main) {
+        [self openDocumentAtURL:main];
+    } else {
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已打开文件夹 %@，未找到含 \\documentclass 的主文件", folderURL.lastPathComponent]];
+    }
+}
+
+/// 决定 ⌘B 实际编译哪个文件：暂存文档就是自己；否则按魔法注释 / \documentclass / 同目录引用推断。
+- (NSURL *)mainFileURLForCompile {
+    NSURL *fileURL = self.documentModel.fileURL;
+    if (!fileURL || self.documentModel.isScratch) return fileURL;
+    return [TMProject mainFileURLForDocumentURL:fileURL content:self.documentModel.content] ?: fileURL;
+}
+
+#pragma mark - TMFileBrowserViewDelegate
+
+- (void)fileBrowserView:(TMFileBrowserView *)browser didSelectFileURL:(NSURL *)url {
+    if ([url.URLByStandardizingPath isEqual:self.documentModel.fileURL.URLByStandardizingPath]) return;
+    [self openDocumentAtURL:url];
+    // 用户取消了保存提示时，把选中项拨回当前文件
+    [browser selectFileURL:self.documentModel.isScratch ? nil : self.documentModel.fileURL];
+}
+
+/// 若 url 处已有 PDF 就载入预览并记为 currentPDFURL；否则显示占位提示。
+- (void)showPDFIfExistsAtURL:(nullable NSURL *)url {
+    if (url && [[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+        self.currentPDFURL = url;
+        [self.pdfView loadPDFFromURL:url];
+        self.pdfPlaceholderView.hidden = YES;
+    } else {
+        self.currentPDFURL = nil;
+        self.pdfPlaceholderView.hidden = NO;
+    }
+}
+
+- (void)refreshWindowTitle {
+    self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.displayName];
+    self.window.representedURL = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
+    self.window.documentEdited = self.documentModel.isDirty;
+}
+
+- (BOOL)hasUnsavedChanges {
+    return self.documentModel.isDirty;
+}
+
+/// 在丢弃当前文档前询问用户。返回 YES 表示可以继续（已保存或用户选择不保存）。
+- (BOOL)confirmDiscardChangesWithTitle:(NSString *)title {
+    if (![self hasUnsavedChanges]) return YES;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = [NSString stringWithFormat:@"“%@” 有未保存的更改，不保存将丢失这些更改。", self.documentModel.displayName];
+    [alert addButtonWithTitle:@"保存"];
+    [alert addButtonWithTitle:@"不保存"];
+    [alert addButtonWithTitle:@"取消"];
+    alert.buttons[2].keyEquivalent = @"\e";
+
+    NSModalResponse response = [alert runModal];
+    if (response == NSAlertFirstButtonReturn) {
+        return [self saveCurrentDocument];
+    } else if (response == NSAlertSecondButtonReturn) {
+        return YES;
+    }
+    return NO;
+}
+
 - (void)openDocumentAtURL:(NSURL *)url {
+    BOOL isDir = NO;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&isDir]) {
+        [TMRecentFiles removeFileURL:url];
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"文件不存在";
+        alert.informativeText = [NSString stringWithFormat:@"找不到 “%@”，可能已被移动或删除。", url.path];
+        [alert runModal];
+        return;
+    }
+    if (isDir) {
+        [self openFolderAtURL:url];
+        return;
+    }
+    if (![TMProject isEditableFileURL:url]) {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+        return;
+    }
+    if (![self confirmDiscardChangesWithTitle:@"打开其他文件前是否保存更改？"]) return;
+
     NSError *error = nil;
     TMDocument *newDoc = [TMDocument documentWithContentsOfURL:url error:&error];
     if (newDoc) {
         self.documentModel = newDoc;
         [self loadDocumentIntoEditor];
         [self.statusBar showReadyState];
+        [TMRecentFiles noteFileURL:url];
     } else {
         NSAlert *alert = [NSAlert alertWithError:error];
         [alert runModal];
     }
 }
 
-- (void)saveCurrentDocument {
+- (BOOL)saveCurrentDocument {
     self.documentModel.content = self.editorTextView.string;
 
-    if (!self.documentModel.fileURL) {
-        NSSavePanel *panel = [NSSavePanel savePanel];
-        panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
-        panel.nameFieldStringValue = @"document.tex";
-        if ([panel runModal] == NSModalResponseOK && panel.URL) {
-            NSError *err = nil;
-            if ([self.documentModel saveToURL:panel.URL error:&err]) {
-                self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.fileURL.lastPathComponent];
-            } else {
-                [[NSAlert alertWithError:err] runModal];
-            }
-        }
-    } else {
-        NSError *err = nil;
-        [self.documentModel saveCurrentFileWithError:&err];
+    if (!self.documentModel.fileURL || self.documentModel.isScratch) {
+        return [self saveDocumentAs];
     }
+
+    NSError *err = nil;
+    if (![self.documentModel saveCurrentFileWithError:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return NO;
+    }
+    [self didWriteCurrentFile];
+    [self refreshWindowTitle];
+    return YES;
+}
+
+- (BOOL)saveDocumentAs {
+    self.documentModel.content = self.editorTextView.string;
+
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
+    panel.nameFieldStringValue = self.documentModel.isScratch || !self.documentModel.fileURL
+        ? @"document.tex"
+        : self.documentModel.fileURL.lastPathComponent;
+    if (!self.documentModel.isScratch && self.documentModel.fileURL) {
+        panel.directoryURL = self.documentModel.fileURL.URLByDeletingLastPathComponent;
+    }
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return NO;
+
+    NSError *err = nil;
+    if (![self.documentModel saveToURL:panel.URL error:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return NO;
+    }
+    [self refreshWindowTitle];
+    [TMRecentFiles noteFileURL:panel.URL];
+    [self syncProjectRootWithDocument];
+    [self startWatchingCurrentFile];
+    [self.completionProvider invalidate];
+    // 换了目录后旧的 PDF 不再对应，重新判断预览
+    [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
+    return YES;
+}
+
+#pragma mark - PDF 导出
+
+- (BOOL)exportPDF {
+    NSURL *pdfURL = self.currentPDFURL;
+    if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"尚未生成 PDF";
+        alert.informativeText = @"请先按下 ⌘B 进行编译，成功生成 PDF 后方可导出。";
+        [alert runModal];
+        return NO;
+    }
+
+    NSSavePanel *panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = @[UTTypePDF];
+    panel.canCreateDirectories = YES;
+    // 默认文件名跟随用户的 .tex 名字；暂存文档给一个友好名字而不是 TeXMini_Document.pdf
+    if (self.documentModel.isScratch || !self.documentModel.fileURL) {
+        panel.nameFieldStringValue = @"document.pdf";
+    } else {
+        panel.nameFieldStringValue = pdfURL.lastPathComponent;
+        panel.directoryURL = self.documentModel.fileURL.URLByDeletingLastPathComponent;
+    }
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return NO;
+    if ([panel.URL isEqual:pdfURL]) return YES; // 选了原位置，无需复制
+
+    NSError *err = nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if ([fm fileExistsAtPath:panel.URL.path]) {
+        [fm removeItemAtURL:panel.URL error:nil];
+    }
+    if (![fm copyItemAtURL:pdfURL toURL:panel.URL error:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return NO;
+    }
+    [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已导出 %@", panel.URL.lastPathComponent]];
+    return YES;
+}
+
+- (void)revealPDFInFinder {
+    NSURL *pdfURL = self.currentPDFURL;
+    if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) return;
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[pdfURL]];
+}
+
+#pragma mark - NSWindowDelegate
+
+- (BOOL)windowShouldClose:(NSWindow *)sender {
+    if (![self confirmDiscardChangesWithTitle:@"关闭窗口前是否保存更改？"]) return NO;
+    // 用户已决定（保存或放弃），避免随后的 applicationShouldTerminate 再问一次
+    self.documentModel.isDirty = NO;
+    return YES;
 }
 
 #pragma mark - 编译动作与回调
@@ -401,23 +705,87 @@
 - (void)compileCurrentDocument {
     self.documentModel.content = self.editorTextView.string;
 
-    // 如果还没有指定文件路径，自动保存到临时工作空间，省去弹窗干扰
+    // 如果还没有指定文件路径，暂存到临时工作空间，省去弹窗干扰
     if (!self.documentModel.fileURL) {
         NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Document.tex"];
         NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
-        [self.documentModel saveToURL:tmpURL error:nil];
+        [self.documentModel saveScratchToURL:tmpURL error:nil];
     } else {
         [self.documentModel saveCurrentFileWithError:nil];
+        [self didWriteCurrentFile];
+        [self refreshWindowTitle];
     }
 
     [self.logDrawer clearLog];
-    [[TMCompiler sharedCompiler] compileFileAtURL:self.documentModel.fileURL];
+    [[TMCompiler sharedCompiler] compileFileAtURL:[self mainFileURLForCompile]];
+}
+
+/// 我们自己写完磁盘后调用：记住新的修改时间（避免误报外部修改），并让补全重新扫描。
+- (void)didWriteCurrentFile {
+    [self rememberCurrentFileModificationDate];
+    [self.completionProvider invalidate];
+}
+
+- (void)cancelCompilation {
+    [[TMCompiler sharedCompiler] cancelCompilation];
+}
+
+- (BOOL)isCompiling {
+    return [TMCompiler sharedCompiler].isCompiling;
+}
+
+#pragma mark - 自动编译
+
+- (void)setAutoCompileEnabled:(BOOL)enabled {
+    _autoCompileEnabled = enabled;
+    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"TMAutoCompile"];
+    if (!enabled) {
+        [self.autoCompileTimer invalidate];
+        self.autoCompileTimer = nil;
+    }
+}
+
+- (void)scheduleAutoCompile {
+    if (!self.autoCompileEnabled) return;
+    [self.autoCompileTimer invalidate];
+    self.autoCompileTimer = [NSTimer scheduledTimerWithTimeInterval:1.5
+                                                             target:self
+                                                           selector:@selector(autoCompileTimerFired)
+                                                           userInfo:nil
+                                                            repeats:NO];
+}
+
+- (void)autoCompileTimerFired {
+    self.autoCompileTimer = nil;
+    if (!self.autoCompileEnabled) return;
+    if ([self isCompiling]) {
+        // 正在编译，等结束后补一次
+        self.needsCompileAfterCurrent = YES;
+        return;
+    }
+    [self compileCurrentDocument];
+}
+
+- (void)runPendingAutoCompileIfNeeded {
+    if (self.needsCompileAfterCurrent && self.autoCompileEnabled) {
+        self.needsCompileAfterCurrent = NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self compileCurrentDocument];
+        });
+    } else {
+        self.needsCompileAfterCurrent = NO;
+    }
 }
 
 - (void)compilerDidStartCompilingDocument:(NSURL *)fileURL {
-    NSString *engineName = @"latexmk";
-    if ([TMCompiler sharedCompiler].engine == TMTeXEngineXeLaTeX) engineName = @"xelatex";
-    if ([TMCompiler sharedCompiler].engine == TMTeXEnginePDFLaTeX) engineName = @"pdflatex";
+    NSString *content = [NSString stringWithContentsOfURL:fileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
+    NSString *engineName = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content];
+    if ([TMCompiler findExecutableNamed:@"latexmk"]) {
+        engineName = [NSString stringWithFormat:@"latexmk · %@", engineName];
+    }
+    if (![fileURL isEqual:self.documentModel.fileURL]) {
+        engineName = [NSString stringWithFormat:@"%@ · 主文件 %@", engineName, fileURL.lastPathComponent];
+    }
     [self.statusBar showCompilingStateWithEngine:engineName];
 }
 
@@ -425,27 +793,41 @@
     [self.logDrawer appendLogText:text];
 }
 
-- (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL {
-    [self.statusBar showSuccessStateWithDuration:durationSeconds];
+- (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL issues:(NSArray<TMLogIssue *> *)issues {
+    NSUInteger warnings = [TMLogParser countOfKind:TMLogIssueWarning inIssues:issues];
+    NSUInteger badBoxes = [TMLogParser countOfKind:TMLogIssueBadBox inIssues:issues];
+    [self.statusBar showSuccessStateWithDuration:durationSeconds warnings:warnings badBoxes:badBoxes];
+    self.currentPDFURL = pdfURL;
     self.pdfPlaceholderView.hidden = YES;
-    [self.pdfView loadPDFFromURL:pdfURL];
-    [self.pdfView reloadPreservingViewport];
+    [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
+    [self.outlineSidebarView.fileBrowserView reload];
+    [self runPendingAutoCompileIfNeeded];
 }
 
-- (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log {
+- (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log issues:(NSArray<TMLogIssue *> *)issues {
     [self.statusBar showErrorStateWithMessage:summary line:lineNumber];
     if (!self.logDrawer.isExpanded) {
         [self.logDrawer toggleAnimated];
     }
+    [self runPendingAutoCompileIfNeeded];
+}
+
+- (void)compilerDidCancel {
+    [self.statusBar showInfoMessage:@"已取消编译"];
+    [self runPendingAutoCompileIfNeeded];
 }
 
 #pragma mark - SyncTeX 双向同步
 
 - (void)forwardSyncToPDF {
-    if (!self.documentModel.fileURL || !self.documentModel.expectedPDFURL) return;
+    if (!self.documentModel.fileURL) return;
+    if (!self.currentPDFURL || !self.pdfView.document) {
+        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘B 编译"];
+        return;
+    }
 
     NSString *src = self.documentModel.fileURL.path;
-    NSString *pdf = self.documentModel.expectedPDFURL.path;
+    NSString *pdf = self.currentPDFURL.path;
 
     TMSyncTeXResult *res = [TMSyncTeX forwardSearchLine:self.currentCursorLine
                                                  column:self.currentCursorCol
@@ -454,34 +836,98 @@
                                                pdfView:self.pdfView];
     if (res) {
         [self.pdfView flashHighlightRect:res.targetRect onPageAtIndex:res.pageIndex];
+    } else {
+        NSString *syncFile = [self.currentPDFURL.URLByDeletingPathExtension URLByAppendingPathExtension:@"synctex.gz"].path;
+        BOOL hasSync = [[NSFileManager defaultManager] fileExistsAtPath:syncFile];
+        [self.statusBar showInfoMessage:hasSync
+            ? [NSString stringWithFormat:@"第 %ld 行在 PDF 中没有对应位置（可能是注释或导言区）", (long)self.currentCursorLine]
+            : @"缺少 .synctex.gz，重新编译一次即可启用同步"];
     }
 }
 
-- (void)pdfViewDidRequestInverseSearchAtPoint:(NSPoint)pointOnPage pageIndex:(NSInteger)pageIndex pageBounds:(NSRect)pageBounds {
-    if (!self.documentModel.expectedPDFURL) return;
+- (void)editorTextViewDidRequestForwardSync {
+    [self forwardSyncToPDF];
+}
 
-    NSString *pdf = self.documentModel.expectedPDFURL.path;
+- (void)pdfViewDidRequestInverseSearchAtPoint:(NSPoint)pointOnPage pageIndex:(NSInteger)pageIndex pageBounds:(NSRect)pageBounds {
+    if (!self.currentPDFURL) return;
+
+    NSString *pdf = self.currentPDFURL.path;
     TMSyncTeXResult *res = [TMSyncTeX inverseSearchPoint:pointOnPage
                                                pageIndex:pageIndex
                                               pageBounds:pageBounds
                                                  pdfPath:pdf];
-    if (res && res.sourceLine > 0) {
-        [self.editorTextView jumpToLine:res.sourceLine column:res.sourceColumn];
-        [self.window makeFirstResponder:self.editorTextView];
+    if (!res || res.sourceLine <= 0) return;
+
+    // SyncTeX 返回的文件名可能是相对 PDF 目录的路径；落在别的文件时直接切过去再跳行。
+    if (res.sourceFilePath.length > 0 && self.documentModel.fileURL) {
+        NSURL *pdfDir = self.currentPDFURL.URLByDeletingLastPathComponent;
+        NSURL *target = [NSURL fileURLWithPath:res.sourceFilePath relativeToURL:pdfDir];
+        NSString *targetPath = target.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
+        NSString *currentPath = self.documentModel.fileURL.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
+        if (targetPath && currentPath && ![targetPath isEqualToString:currentPath]) {
+            NSURL *targetURL = [NSURL fileURLWithPath:targetPath];
+            if (![[NSFileManager defaultManager] fileExistsAtPath:targetPath] || ![TMProject isEditableFileURL:targetURL]) {
+                NSBeep();
+                [self.statusBar showInfoMessage:[NSString stringWithFormat:@"该位置来自 %@ 第 %ld 行，文件不可打开",
+                                                 targetPath.lastPathComponent, (long)res.sourceLine]];
+                return;
+            }
+            [self openDocumentAtURL:targetURL];
+            if (![self.documentModel.fileURL.URLByStandardizingPath.URLByResolvingSymlinksInPath.path isEqualToString:targetPath]) {
+                return; // 用户取消了切换
+            }
+        }
     }
+
+    [self.editorTextView jumpToLine:res.sourceLine column:res.sourceColumn];
+    [self.window makeFirstResponder:self.editorTextView];
 }
 
 #pragma mark - TMEditorTextViewDelegate & NSTextDelegate
 
 - (void)textDidChange:(NSNotification *)notification {
+    if (!self.documentModel.isDirty) {
+        self.documentModel.isDirty = YES;
+        self.window.documentEdited = YES;
+    }
     [self scheduleOutlineUpdateImmediate:NO];
+    [self scheduleAutoCompile];
 }
 
 - (void)editorTextViewDidChangeCursorPositionToLine:(NSInteger)line column:(NSInteger)column {
     self.currentCursorLine = line;
     self.currentCursorCol = column;
-    [self.statusBar setCursorLine:line column:column totalChars:self.editorTextView.string.length];
+    [self.statusBar setCursorLine:line column:column];
     [self.outlineSidebarView highlightItemForLineNumber:line];
+}
+
+- (void)updateWordCount {
+    NSString *text = self.editorTextView.string;
+    __block NSUInteger words = 0;
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                             options:NSStringEnumerationByWords | NSStringEnumerationSubstringNotRequired
+                          usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+        words++;
+    }];
+    [self.statusBar setWordCount:words];
+}
+
+#pragma mark - 编辑器字号
+
+- (void)increaseEditorFontSize {
+    self.editorTextView.editorFontSize = self.editorTextView.editorFontSize + 1.0;
+    [self persistEditorFontSize];
+}
+
+- (void)decreaseEditorFontSize {
+    self.editorTextView.editorFontSize = self.editorTextView.editorFontSize - 1.0;
+    [self persistEditorFontSize];
+}
+
+- (void)resetEditorFontSize {
+    self.editorTextView.editorFontSize = 13.5;
+    [self persistEditorFontSize];
 }
 
 #pragma mark - TMStatusBarViewDelegate
@@ -497,6 +943,7 @@
 
 - (void)statusBarDidChangeEngine:(TMTeXEngine)engine {
     [TMCompiler sharedCompiler].engine = engine;
+    [[NSUserDefaults standardUserDefaults] setInteger:engine forKey:kTMDefaultsEngine];
 }
 
 #pragma mark - 大纲解析与侧边栏控制
@@ -520,23 +967,14 @@
     NSArray<TMOutlineItem *> *rootItems = [TMOutlineParser parseOutlineFromLaTeXString:content flatList:&flatList];
     [self.outlineSidebarView updateWithRootItems:rootItems flatItems:flatList];
     [self.outlineSidebarView highlightItemForLineNumber:self.currentCursorLine];
+    [self updateWordCount];
 }
 
 - (void)toggleOutlineSidebar {
-    if (!self.isOutlineCollapsed) {
-        // 收起大纲
-        CGFloat currentW = self.outlineSidebarView.frame.size.width;
-        if (currentW >= 160.0 && currentW <= 380.0) {
-            self.lastOutlineWidth = currentW;
-        }
-        self.isOutlineCollapsed = YES;
-    } else {
-        // 展开大纲
-        self.isOutlineCollapsed = NO;
-    }
-
-    [self layoutMainSplitView];
-    [self.mainSplitView adjustSubviews];
+    // 交给系统：带动画、自动隐藏分割线、宽度由 autosave 记住
+    [self.mainSplitViewController toggleSidebar:nil];
+    // toggleSidebar: 的动画结束后 collapsed 才更新，这里记录目标状态
+    [[NSUserDefaults standardUserDefaults] setBool:!self.sidebarItem.isCollapsed forKey:kTMDefaultsOutlineCollapsed];
 }
 
 #pragma mark - TMOutlineSidebarViewDelegate
@@ -545,6 +983,10 @@
     if (item) {
         [self.editorTextView jumpToLine:item.lineNumber column:1];
         [self.window makeFirstResponder:self.editorTextView];
+        // jumpToLine 已同步更新了 currentCursorLine，顺带把 PDF 也定位到该章节；没有 PDF 时静默跳过
+        if (self.currentPDFURL && self.pdfView.document) {
+            [self forwardSyncToPDF];
+        }
     }
 }
 
@@ -553,6 +995,27 @@
 }
 
 #pragma mark - 公共导航动作
+
+- (void)promptGotoLine {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"跳转到行";
+    alert.informativeText = [NSString stringWithFormat:@"当前第 %ld 行，请输入目标行号：", (long)self.currentCursorLine];
+    [alert addButtonWithTitle:@"跳转"];
+    [alert addButtonWithTitle:@"取消"];
+
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 200, 24)];
+    field.placeholderString = @"行号";
+    alert.accessoryView = field;
+    alert.window.initialFirstResponder = field;
+
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        NSInteger line = field.integerValue;
+        if (line > 0) {
+            [self.editorTextView jumpToLine:line column:1];
+            [self.window makeFirstResponder:self.editorTextView];
+        }
+    }
+}
 
 - (IBAction)toggleSidebar:(nullable id)sender {
     [self toggleOutlineSidebar];
@@ -570,6 +1033,48 @@
     [self.pdfView zoomOut:nil];
 }
 
+#pragma mark - PDF 导航与打印
+
+- (void)pdfPageDidChange:(NSNotification *)note {
+    PDFDocument *doc = self.pdfView.document;
+    if (!doc) {
+        [self.statusBar setPageIndex:0 pageCount:0];
+        return;
+    }
+    PDFPage *page = self.pdfView.currentPage;
+    NSInteger idx = page ? [doc indexForPage:page] : 0;
+    [self.statusBar setPageIndex:idx pageCount:(NSInteger)doc.pageCount];
+}
+
+- (void)pdfNextPage {
+    if (self.pdfView.canGoToNextPage) [self.pdfView goToNextPage:nil];
+}
+
+- (void)pdfPreviousPage {
+    if (self.pdfView.canGoToPreviousPage) [self.pdfView goToPreviousPage:nil];
+}
+
+- (void)pdfFitWidth {
+    self.pdfView.autoScales = YES;
+}
+
+- (void)pdfActualSize {
+    self.pdfView.autoScales = NO;
+    self.pdfView.scaleFactor = 1.0;
+}
+
+- (BOOL)hasPDF {
+    return self.pdfView.document != nil;
+}
+
+- (void)printPDF {
+    if (!self.pdfView.document) return;
+    NSPrintInfo *info = [[NSPrintInfo sharedPrintInfo] copy];
+    info.horizontalPagination = NSPrintingPaginationModeFit;
+    info.verticalPagination = NSPrintingPaginationModeFit;
+    [self.pdfView printWithInfo:info autoRotate:YES];
+}
+
 #pragma mark - NSToolbarDelegate
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
@@ -584,6 +1089,7 @@
         NSToolbarSpaceItemIdentifier,
         @"CompileDoc",
         @"ForwardSync",
+        @"ExportPDF",
         @"CleanAux",
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
@@ -603,6 +1109,7 @@
         NSToolbarSpaceItemIdentifier,
         @"CompileDoc",
         @"ForwardSync",
+        @"ExportPDF",
         @"CleanAux",
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
@@ -659,10 +1166,17 @@
     } else if ([itemIdentifier isEqualToString:@"ForwardSync"]) {
         item.label = @"同步 (⌘J)";
         item.paletteLabel = @"正向跳转至 PDF";
-        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J)";
+        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J、双击或 ⌘+点击代码)";
         item.image = [NSImage imageWithSystemSymbolName:@"arrow.right.circle" accessibilityDescription:@"Sync to PDF"];
         item.target = self;
         item.action = @selector(forwardSyncToPDF);
+    } else if ([itemIdentifier isEqualToString:@"ExportPDF"]) {
+        item.label = @"导出 PDF";
+        item.paletteLabel = @"导出 PDF";
+        item.toolTip = @"把编译好的 PDF 另存到指定位置 (⇧⌘E)";
+        item.image = [NSImage imageWithSystemSymbolName:@"square.and.arrow.up" accessibilityDescription:@"Export PDF"];
+        item.target = self;
+        item.action = @selector(exportPDFToolbarAction:);
     } else if ([itemIdentifier isEqualToString:@"CleanAux"]) {
         item.label = @"清理";
         item.paletteLabel = @"清理缓存文件";
@@ -693,6 +1207,7 @@
 #pragma mark - 模板与工具栏操作
 
 - (void)newDocumentAction:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"新建文档前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithBlankTemplate];
     [self loadDocumentIntoEditor];
 }
@@ -708,6 +1223,7 @@
 }
 
 - (void)applyDefaultTemplate:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithDefaultTemplate];
     [self.statusBar setSelectedEngine:TMTeXEngineLatexmk];
     [TMCompiler sharedCompiler].engine = TMTeXEngineLatexmk;
@@ -716,6 +1232,7 @@
 }
 
 - (void)applyChineseTemplate:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithChineseTemplate];
     [self.statusBar setSelectedEngine:TMTeXEngineXeLaTeX];
     [TMCompiler sharedCompiler].engine = TMTeXEngineXeLaTeX;
@@ -724,21 +1241,52 @@
 }
 
 - (void)applyBlankTemplate:(id)sender {
+    if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithBlankTemplate];
     [self loadDocumentIntoEditor];
 }
 
 - (void)openFileAction:(id)sender {
     NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = YES;
+    panel.message = @"选择 .tex / .bib / .sty 等文件，或直接选择一个项目文件夹";
+    NSMutableArray<UTType *> *types = [NSMutableArray arrayWithObject:UTTypeFolder];
+    for (NSString *ext in [TMProject editableExtensions]) {
+        UTType *t = [UTType typeWithFilenameExtension:ext];
+        if (t) [types addObject:t];
+    }
+    [types addObject:UTTypePlainText];
+    panel.allowedContentTypes = types;
     if ([panel runModal] == NSModalResponseOK && panel.URL) {
         [self openDocumentAtURL:panel.URL];
+    }
+}
+
+- (void)openFolderAction:(id)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = YES;
+    panel.canChooseFiles = NO;
+    panel.message = @"选择包含 .tex 文件的项目文件夹";
+    if ([panel runModal] == NSModalResponseOK && panel.URL) {
+        [self openFolderAtURL:panel.URL];
     }
 }
 
 - (void)cleanAuxFilesAction:(id)sender {
     [self.documentModel cleanAuxiliaryFiles];
     [self.statusBar showReadyState];
+}
+
+- (void)exportPDFToolbarAction:(id)sender {
+    [self exportPDF];
+}
+
+- (BOOL)validateToolbarItem:(NSToolbarItem *)item {
+    if (item.action == @selector(exportPDFToolbarAction:)) {
+        return self.currentPDFURL != nil;
+    }
+    return YES;
 }
 
 @end

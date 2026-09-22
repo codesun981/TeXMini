@@ -1,6 +1,12 @@
 #import "AppDelegate.h"
 #import "TMDocument.h"
+#import "TMCompiler.h"
+#import "TMRecentFiles.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+@interface AppDelegate () <NSMenuDelegate>
+@property (nonatomic, strong) NSMenu *recentMenu;
+@end
 
 @implementation AppDelegate
 
@@ -14,6 +20,7 @@
     [self.mainWindowController showWindow:nil];
     [self.mainWindowController.window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    [self checkMacTeXInstallation];
 }
 
 - (BOOL)application:(NSApplication *)sender openFile:(NSString *)filename {
@@ -24,12 +31,20 @@
         TMDocument *doc = [TMDocument documentWithContentsOfURL:fileURL error:nil];
         self.mainWindowController = [[TMMainWindowController alloc] initWithDocument:doc];
         [self.mainWindowController showWindow:nil];
+        if (doc) [TMRecentFiles noteFileURL:fileURL];
     }
     return YES;
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication *)sender {
     return YES;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication *)sender {
+    if (self.mainWindowController && ![self.mainWindowController confirmDiscardChangesWithTitle:@"退出前是否保存更改？"]) {
+        return NSTerminateCancel;
+    }
+    return NSTerminateNow;
 }
 
 #pragma mark - 菜单栏配置
@@ -56,15 +71,25 @@
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
     [fileMenu addItemWithTitle:@"新建" action:@selector(newDocumentAction:) keyEquivalent:@"n"];
     [fileMenu addItemWithTitle:@"打开…" action:@selector(openDocumentAction:) keyEquivalent:@"o"];
+    [fileMenu addItemWithTitle:@"打开文件夹…" action:@selector(openFolderAction:) keyEquivalent:@"O"];
+    NSMenuItem *recentItem = [[NSMenuItem alloc] initWithTitle:@"打开最近" action:nil keyEquivalent:@""];
+    self.recentMenu = [[NSMenu alloc] initWithTitle:@"打开最近"];
+    self.recentMenu.delegate = self;
+    recentItem.submenu = self.recentMenu;
+    [fileMenu addItem:recentItem];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"保存" action:@selector(saveDocumentAction:) keyEquivalent:@"s"];
-    [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"e"];
+    [fileMenu addItemWithTitle:@"另存为…" action:@selector(saveDocumentAsAction:) keyEquivalent:@"S"];
+    // ⌘E 已被“使用所选内容查找”占用（编辑器有焦点时会被抢走），导出改用 ⇧⌘E
+    [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"E"];
+    [fileMenu addItemWithTitle:@"在访达中显示 PDF" action:@selector(revealPDFAction:) keyEquivalent:@"R"];
+    [fileMenu addItemWithTitle:@"打印 PDF…" action:@selector(printPDFAction:) keyEquivalent:@"p"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
     fileMenuItem.submenu = fileMenu;
     [mainMenu addItem:fileMenuItem];
 
-    // 3. 编辑菜单 (Edit - 标准系统剪切、复制、撤销)
+    // 3. 编辑菜单 (Edit - 标准系统剪切、复制、撤销 + 查找 + LaTeX 编辑动作)
     NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
     NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"编辑"];
     [editMenu addItemWithTitle:@"撤销" action:@selector(undo:) keyEquivalent:@"z"];
@@ -74,6 +99,26 @@
     [editMenu addItemWithTitle:@"复制" action:@selector(copy:) keyEquivalent:@"c"];
     [editMenu addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
     [editMenu addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *findItem = [[NSMenuItem alloc] initWithTitle:@"查找" action:nil keyEquivalent:@""];
+    NSMenu *findMenu = [[NSMenu alloc] initWithTitle:@"查找"];
+    [self addFinderItemTo:findMenu title:@"查找…" key:@"f" mask:NSEventModifierFlagCommand tag:NSTextFinderActionShowFindInterface];
+    [self addFinderItemTo:findMenu title:@"查找并替换…" key:@"f" mask:NSEventModifierFlagCommand | NSEventModifierFlagOption tag:NSTextFinderActionShowReplaceInterface];
+    [self addFinderItemTo:findMenu title:@"查找下一个" key:@"g" mask:NSEventModifierFlagCommand tag:NSTextFinderActionNextMatch];
+    [self addFinderItemTo:findMenu title:@"查找上一个" key:@"g" mask:NSEventModifierFlagCommand | NSEventModifierFlagShift tag:NSTextFinderActionPreviousMatch];
+    [self addFinderItemTo:findMenu title:@"使用所选内容查找" key:@"e" mask:NSEventModifierFlagCommand tag:NSTextFinderActionSetSearchString];
+    [self addFinderItemTo:findMenu title:@"隐藏查找栏" key:@"" mask:0 tag:NSTextFinderActionHideFindInterface];
+    findItem.submenu = findMenu;
+    [editMenu addItem:findItem];
+    [editMenu addItemWithTitle:@"跳转到行…" action:@selector(gotoLineAction:) keyEquivalent:@"l"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+
+    [editMenu addItemWithTitle:@"切换注释" action:@selector(toggleComment:) keyEquivalent:@"/"];
+    [editMenu addItemWithTitle:@"增加缩进" action:@selector(indentSelection:) keyEquivalent:@"]"];
+    [editMenu addItemWithTitle:@"减少缩进" action:@selector(outdentSelection:) keyEquivalent:@"["];
+    [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"拼写检查（输入时）" action:@selector(toggleContinuousSpellChecking:) keyEquivalent:@""];
     editMenuItem.submenu = editMenu;
     [mainMenu addItem:editMenuItem];
 
@@ -81,6 +126,9 @@
     NSMenuItem *compileMenuItem = [[NSMenuItem alloc] init];
     NSMenu *compileMenu = [[NSMenu alloc] initWithTitle:@"编译"];
     [compileMenu addItemWithTitle:@"保存并编译" action:@selector(compileDocumentAction:) keyEquivalent:@"b"];
+    [compileMenu addItemWithTitle:@"取消编译" action:@selector(cancelCompileAction:) keyEquivalent:@"."];
+    [compileMenu addItemWithTitle:@"自动编译（停止输入后）" action:@selector(toggleAutoCompileAction:) keyEquivalent:@""];
+    [compileMenu addItem:[NSMenuItem separatorItem]];
     [compileMenu addItemWithTitle:@"正向跳转至 PDF" action:@selector(forwardSyncAction:) keyEquivalent:@"j"];
     [compileMenu addItem:[NSMenuItem separatorItem]];
     [compileMenu addItemWithTitle:@"清理辅助文件" action:@selector(cleanAuxAction:) keyEquivalent:@"k"];
@@ -94,8 +142,22 @@
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"放大" action:@selector(zoomInAction:) keyEquivalent:@"+"];
     [viewMenu addItemWithTitle:@"缩小" action:@selector(zoomOutAction:) keyEquivalent:@"-"];
+    [viewMenu addItemWithTitle:@"适合宽度" action:@selector(pdfFitWidthAction:) keyEquivalent:@"0"];
+    NSMenuItem *actual = [viewMenu addItemWithTitle:@"实际大小" action:@selector(pdfActualSizeAction:) keyEquivalent:@"0"];
+    actual.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    NSMenuItem *prevPage = [viewMenu addItemWithTitle:@"上一页" action:@selector(pdfPreviousPageAction:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSUpArrowFunctionKey]];
+    prevPage.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *nextPage = [viewMenu addItemWithTitle:@"下一页" action:@selector(pdfNextPageAction:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey]];
+    nextPage.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    [viewMenu addItemWithTitle:@"切换日志抽屉" action:@selector(toggleLogAction:) keyEquivalent:@"l"];
+    NSMenuItem *fontUp = [viewMenu addItemWithTitle:@"编辑器字体放大" action:@selector(editorFontUpAction:) keyEquivalent:@"="];
+    fontUp.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *fontDown = [viewMenu addItemWithTitle:@"编辑器字体缩小" action:@selector(editorFontDownAction:) keyEquivalent:@"-"];
+    fontDown.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *fontReset = [viewMenu addItemWithTitle:@"编辑器字体恢复默认" action:@selector(editorFontResetAction:) keyEquivalent:@"0"];
+    fontReset.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    [viewMenu addItemWithTitle:@"切换日志抽屉" action:@selector(toggleLogAction:) keyEquivalent:@"L"];
     viewMenuItem.submenu = viewMenu;
     [mainMenu addItem:viewMenuItem];
 
@@ -110,7 +172,58 @@
     [NSApp setMainMenu:mainMenu];
 }
 
+#pragma mark - 最近打开
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != self.recentMenu) return;
+    [menu removeAllItems];
+
+    NSArray<NSURL *> *urls = [TMRecentFiles recentFileURLs];
+    for (NSURL *url in urls) {
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:url.lastPathComponent action:@selector(openRecentAction:) keyEquivalent:@""];
+        item.representedObject = url;
+        item.toolTip = url.path;
+        item.image = [[NSWorkspace sharedWorkspace] iconForFile:url.path];
+        item.image.size = NSMakeSize(16, 16);
+        item.target = self;
+        [menu addItem:item];
+    }
+    if (urls.count == 0) {
+        NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"无最近项目" action:nil keyEquivalent:@""];
+        empty.enabled = NO;
+        [menu addItem:empty];
+    }
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *clear = [[NSMenuItem alloc] initWithTitle:@"清除菜单" action:@selector(clearRecentAction:) keyEquivalent:@""];
+    clear.target = self;
+    clear.enabled = urls.count > 0;
+    [menu addItem:clear];
+}
+
+- (void)openRecentAction:(NSMenuItem *)sender {
+    NSURL *url = sender.representedObject;
+    if ([url isKindOfClass:[NSURL class]]) {
+        [self.mainWindowController openDocumentAtURL:url];
+        [self.mainWindowController.window makeKeyAndOrderFront:nil];
+    }
+}
+
+- (void)clearRecentAction:(id)sender {
+    [TMRecentFiles clear];
+}
+
 #pragma mark - 菜单快捷响应
+
+- (void)addFinderItemTo:(NSMenu *)menu title:(NSString *)title key:(NSString *)key mask:(NSEventModifierFlags)mask tag:(NSInteger)tag {
+    NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:title action:@selector(performTextFinderAction:) keyEquivalent:key];
+    item.keyEquivalentModifierMask = mask;
+    item.tag = tag;
+    [menu addItem:item];
+}
+
+- (void)gotoLineAction:(id)sender {
+    [self.mainWindowController promptGotoLine];
+}
 
 - (void)newDocumentAction:(id)sender {
     if (self.mainWindowController) {
@@ -124,19 +237,66 @@
 }
 
 - (void)openDocumentAction:(id)sender {
-    NSOpenPanel *panel = [NSOpenPanel openPanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"tex"] ?: UTTypePlainText];
-    if ([panel runModal] == NSModalResponseOK && panel.URL) {
-        [self.mainWindowController openDocumentAtURL:panel.URL];
-    }
+    [self.mainWindowController openFileAction:sender];
+}
+
+- (void)openFolderAction:(id)sender {
+    [self.mainWindowController openFolderAction:sender];
 }
 
 - (void)saveDocumentAction:(id)sender {
     [self.mainWindowController saveCurrentDocument];
 }
 
+- (void)saveDocumentAsAction:(id)sender {
+    [self.mainWindowController saveDocumentAs];
+}
+
 - (void)compileDocumentAction:(id)sender {
     [self.mainWindowController compileCurrentDocument];
+}
+
+- (void)cancelCompileAction:(id)sender {
+    [self.mainWindowController cancelCompilation];
+}
+
+- (void)toggleAutoCompileAction:(id)sender {
+    self.mainWindowController.autoCompileEnabled = !self.mainWindowController.autoCompileEnabled;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    SEL action = menuItem.action;
+    if (action == @selector(cancelCompileAction:)) {
+        return [self.mainWindowController isCompiling];
+    }
+    if (action == @selector(toggleAutoCompileAction:)) {
+        menuItem.state = self.mainWindowController.autoCompileEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    if (action == @selector(exportPDFAction:) || action == @selector(revealPDFAction:)) {
+        return self.mainWindowController.currentPDFURL != nil;
+    }
+    if (action == @selector(printPDFAction:) || action == @selector(pdfFitWidthAction:) ||
+        action == @selector(pdfActualSizeAction:) || action == @selector(pdfPreviousPageAction:) ||
+        action == @selector(pdfNextPageAction:) || action == @selector(zoomInAction:) || action == @selector(zoomOutAction:)) {
+        return [self.mainWindowController hasPDF];
+    }
+    return YES;
+}
+
+- (void)checkMacTeXInstallation {
+    if ([TMCompiler isMacTeXInstalled]) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"未检测到 LaTeX 发行版";
+    alert.informativeText = @"TeXMini 需要 MacTeX（或 BasicTeX）提供 latexmk / pdflatex / xelatex。\n"
+                            @"已查找：/Library/TeX/texbin、/usr/local/bin、/opt/homebrew/bin。\n\n"
+                            @"安装完成后重新启动 TeXMini 即可编译。";
+    [alert addButtonWithTitle:@"前往下载 MacTeX"];
+    [alert addButtonWithTitle:@"稍后"];
+    if ([alert runModal] == NSAlertFirstButtonReturn) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"https://tug.org/mactex/"]];
+    }
 }
 
 - (void)forwardSyncAction:(id)sender {
@@ -163,26 +323,30 @@
     [self.mainWindowController zoomOut];
 }
 
-- (void)exportPDFAction:(id)sender {
-    NSURL *pdfURL = self.mainWindowController.documentModel.expectedPDFURL;
-    if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) {
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"尚未生成 PDF";
-        alert.informativeText = @"请先按下 ⌘B 进行编译，成功生成 PDF 后方可导出。";
-        [alert runModal];
-        return;
-    }
+- (void)editorFontUpAction:(id)sender {
+    [self.mainWindowController increaseEditorFontSize];
+}
 
-    NSSavePanel *panel = [NSSavePanel savePanel];
-    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:@"pdf"] ?: UTTypePDF];
-    panel.nameFieldStringValue = pdfURL.lastPathComponent;
-    if ([panel runModal] == NSModalResponseOK && panel.URL) {
-        NSError *err = nil;
-        [[NSFileManager defaultManager] removeItemAtURL:panel.URL error:nil];
-        if (![[NSFileManager defaultManager] copyItemAtURL:pdfURL toURL:panel.URL error:&err]) {
-            [[NSAlert alertWithError:err] runModal];
-        }
-    }
+- (void)editorFontDownAction:(id)sender {
+    [self.mainWindowController decreaseEditorFontSize];
+}
+
+- (void)editorFontResetAction:(id)sender {
+    [self.mainWindowController resetEditorFontSize];
+}
+
+- (void)pdfFitWidthAction:(id)sender { [self.mainWindowController pdfFitWidth]; }
+- (void)pdfActualSizeAction:(id)sender { [self.mainWindowController pdfActualSize]; }
+- (void)pdfPreviousPageAction:(id)sender { [self.mainWindowController pdfPreviousPage]; }
+- (void)pdfNextPageAction:(id)sender { [self.mainWindowController pdfNextPage]; }
+- (void)printPDFAction:(id)sender { [self.mainWindowController printPDF]; }
+
+- (void)exportPDFAction:(id)sender {
+    [self.mainWindowController exportPDF];
+}
+
+- (void)revealPDFAction:(id)sender {
+    [self.mainWindowController revealPDFInFinder];
 }
 
 @end

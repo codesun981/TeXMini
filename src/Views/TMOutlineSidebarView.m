@@ -92,19 +92,23 @@
 @interface TMOutlineSidebarView () <NSOutlineViewDelegate, NSOutlineViewDataSource>
 
 @property (nonatomic, strong) NSView *headerView;
-@property (nonatomic, strong) NSTextField *titleLabel;
+@property (nonatomic, strong) NSSegmentedControl *modeControl;
 @property (nonatomic, strong) NSTextField *countBadgeLabel;
 @property (nonatomic, strong) NSButton *toggleButton;
 @property (nonatomic, strong) NSScrollView *scrollView;
 @property (nonatomic, strong) NSOutlineView *outlineView;
 @property (nonatomic, strong) NSView *emptyView;
+@property (nonatomic, strong, readwrite) TMFileBrowserView *fileBrowserView;
 
 @property (nonatomic, copy, readwrite) NSArray<TMOutlineItem *> *rootItems;
 @property (nonatomic, copy, readwrite) NSArray<TMOutlineItem *> *flatItems;
 
 @property (nonatomic, assign) BOOL isProgrammaticSelection;
+@property (nonatomic, assign) BOOL selectionChangedByClick;
 
 @end
+
+static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
 
 @implementation TMOutlineSidebarView
 
@@ -119,6 +123,11 @@
         [self setupHeader];
         [self setupOutlineView];
         [self setupEmptyView];
+        [self setupFileBrowser];
+
+        NSInteger saved = [[NSUserDefaults standardUserDefaults] integerForKey:kTMDefaultsSidebarMode];
+        _mode = -1; // 强制 setter 生效
+        self.mode = (saved == TMSidebarModeFiles) ? TMSidebarModeFiles : TMSidebarModeOutline;
     }
     return self;
 }
@@ -135,16 +144,15 @@
     _headerView.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:_headerView];
 
-    NSImageView *iconView = [NSImageView imageViewWithImage:[NSImage imageWithSystemSymbolName:@"list.bullet.indent" accessibilityDescription:@"大纲"]];
-    iconView.contentTintColor = [NSColor secondaryLabelColor];
-    iconView.translatesAutoresizingMaskIntoConstraints = NO;
-    [_headerView addSubview:iconView];
-
-    _titleLabel = [NSTextField labelWithString:@"大纲"];
-    _titleLabel.font = [NSFont systemFontOfSize:12.5 weight:NSFontWeightSemibold];
-    _titleLabel.textColor = [NSColor labelColor];
-    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [_headerView addSubview:_titleLabel];
+    _modeControl = [NSSegmentedControl segmentedControlWithLabels:@[@"大纲", @"文件"]
+                                                     trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                           target:self
+                                                           action:@selector(modeControlChanged:)];
+    _modeControl.segmentStyle = NSSegmentStyleRounded;
+    _modeControl.controlSize = NSControlSizeSmall;
+    _modeControl.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    _modeControl.translatesAutoresizingMaskIntoConstraints = NO;
+    [_headerView addSubview:_modeControl];
 
     _countBadgeLabel = [NSTextField labelWithString:@"0 节"];
     _countBadgeLabel.font = [NSFont systemFontOfSize:10.5 weight:NSFontWeightRegular];
@@ -158,7 +166,7 @@
     _toggleButton.bordered = NO;
     _toggleButton.buttonType = NSButtonTypeMomentaryChange;
     _toggleButton.contentTintColor = [NSColor secondaryLabelColor];
-    _toggleButton.toolTip = @"收起大纲视图 (⌘1)";
+    _toggleButton.toolTip = @"收起侧边栏 (⌘1)";
     _toggleButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_headerView addSubview:_toggleButton];
 
@@ -173,16 +181,12 @@
         [_headerView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [_headerView.heightAnchor constraintEqualToConstant:36],
 
-        [iconView.leadingAnchor constraintEqualToAnchor:_headerView.leadingAnchor constant:12],
-        [iconView.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
-        [iconView.widthAnchor constraintEqualToConstant:15],
-        [iconView.heightAnchor constraintEqualToConstant:15],
+        [_modeControl.leadingAnchor constraintEqualToAnchor:_headerView.leadingAnchor constant:10],
+        [_modeControl.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
 
-        [_titleLabel.leadingAnchor constraintEqualToAnchor:iconView.trailingAnchor constant:6],
-        [_titleLabel.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
-
-        [_countBadgeLabel.leadingAnchor constraintEqualToAnchor:_titleLabel.trailingAnchor constant:6],
+        [_countBadgeLabel.leadingAnchor constraintEqualToAnchor:_modeControl.trailingAnchor constant:8],
         [_countBadgeLabel.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
+        [_countBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_toggleButton.leadingAnchor constant:-4],
 
         [_toggleButton.trailingAnchor constraintEqualToAnchor:_headerView.trailingAnchor constant:-8],
         [_toggleButton.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
@@ -194,6 +198,47 @@
         [divider.bottomAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
         [divider.heightAnchor constraintEqualToConstant:1]
     ]];
+}
+
+- (void)setupFileBrowser {
+    _fileBrowserView = [[TMFileBrowserView alloc] init];
+    _fileBrowserView.translatesAutoresizingMaskIntoConstraints = NO;
+    _fileBrowserView.hidden = YES;
+    [self addSubview:_fileBrowserView];
+    [NSLayoutConstraint activateConstraints:@[
+        [_fileBrowserView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
+        [_fileBrowserView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_fileBrowserView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_fileBrowserView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor]
+    ]];
+}
+
+#pragma mark - 模式切换
+
+- (void)setMode:(TMSidebarMode)mode {
+    if (_mode == mode) return;
+    _mode = mode;
+    self.modeControl.selectedSegment = mode;
+    [[NSUserDefaults standardUserDefaults] setInteger:mode forKey:kTMDefaultsSidebarMode];
+    [self applyModeVisibility];
+}
+
+- (void)modeControlChanged:(NSSegmentedControl *)sender {
+    self.mode = (TMSidebarMode)sender.selectedSegment;
+}
+
+- (void)applyModeVisibility {
+    BOOL files = (self.mode == TMSidebarModeFiles);
+    self.fileBrowserView.hidden = !files;
+    self.countBadgeLabel.hidden = files;
+    if (files) {
+        self.scrollView.hidden = YES;
+        self.emptyView.hidden = YES;
+    } else {
+        BOOL empty = self.rootItems.count == 0;
+        self.scrollView.hidden = empty;
+        self.emptyView.hidden = !empty;
+    }
 }
 
 - (void)setupOutlineView {
@@ -285,13 +330,7 @@
 
     self.countBadgeLabel.stringValue = [NSString stringWithFormat:@"%lu 节", (unsigned long)self.flatItems.count];
 
-    if (self.rootItems.count == 0) {
-        self.emptyView.hidden = NO;
-        self.scrollView.hidden = YES;
-    } else {
-        self.emptyView.hidden = YES;
-        self.scrollView.hidden = NO;
-    }
+    [self applyModeVisibility];
 
     [self.outlineView reloadData];
 
@@ -337,6 +376,12 @@
 }
 
 - (void)outlineViewClicked:(id)sender {
+    // 点击导致选中行变化时，outlineViewSelectionDidChange: 已经通知过了；
+    // 这里只处理“再次点击已选中的同一项”（用户想重新跳转）
+    if (_selectionChangedByClick) {
+        _selectionChangedByClick = NO;
+        return;
+    }
     NSInteger clickedRow = self.outlineView.clickedRow;
     if (clickedRow >= 0) {
         TMOutlineItem *item = [self.outlineView itemAtRow:clickedRow];
@@ -351,6 +396,7 @@
 
     NSInteger selectedRow = self.outlineView.selectedRow;
     if (selectedRow >= 0) {
+        _selectionChangedByClick = YES;
         TMOutlineItem *item = [self.outlineView itemAtRow:selectedRow];
         if (item && [self.delegate respondsToSelector:@selector(outlineSidebarView:didSelectItem:)]) {
             [self.delegate outlineSidebarView:self didSelectItem:item];
