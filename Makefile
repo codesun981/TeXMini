@@ -17,8 +17,12 @@ install: build
 	@cp -R $(BUNDLE) /Applications/
 	@echo "==> 安装成功！您可以在访达或启动台中打开 $(APP_NAME)。"
 
+test:
+	@chmod +x tests/run_tests.sh
+	@./tests/run_tests.sh
+
 clean:
 	@rm -rf build sample/*.aux sample/*.log sample/*.synctex.gz sample/*.fls sample/*.fdb_latexmk sample/*.pdf
 	@echo "==> 清理完成。"
 
-.PHONY: all build run install clean
+.PHONY: all build run install test clean
