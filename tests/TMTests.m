@@ -69,6 +69,24 @@ TM_TEST(test_real_save_clears_scratch_and_dirty) {
     TM_ASSERT_EQ_STR(doc.displayName, @"tmtest_real.tex");
 }
 
+TM_TEST(test_clean_auxiliary_files_removes_aux_keeps_pdf_and_tex) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"tmtest_clean"];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    [fm removeItemAtPath:dir error:nil];
+    [fm createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    for (NSString *name in @[@"main.tex", @"main.pdf", @"main.aux", @"main.bbl", @"main.synctex.gz", @"main.run.xml", @"other.aux"]) {
+        [@"x" writeToFile:[dir stringByAppendingPathComponent:name] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    [TMDocument cleanAuxiliaryFilesForTeXFileURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"main.tex"]]];
+    TM_ASSERT_TRUE([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.tex"]]);
+    TM_ASSERT_TRUE([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.pdf"]]);
+    TM_ASSERT_TRUE([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"other.aux"]]);
+    TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.aux"]]);
+    TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.bbl"]]);
+    TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.synctex.gz"]]);
+    TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.run.xml"]]);
+}
+
 #pragma mark - TMEditActions
 
 TM_TEST(test_toggle_comment_adds_prefix_to_every_line) {

@@ -130,13 +130,19 @@
 
 - (void)cleanAuxiliaryFiles {
     if (!self.fileURL) return;
+    [TMDocument cleanAuxiliaryFilesForTeXFileURL:self.fileURL];
+}
 
-    NSString *dir = [self.fileURL URLByDeletingLastPathComponent].path;
-    NSString *base = [self.fileURL.URLByDeletingPathExtension lastPathComponent];
-    NSArray<NSString *> *extensions = @[@"aux", @"log", @"synctex.gz", @"fls", @"fdb_latexmk", @"out", @"toc", @"bbl", @"blg"];
++ (NSArray<NSString *> *)auxiliaryExtensions {
+    return @[@"aux", @"log", @"synctex.gz", @"fls", @"fdb_latexmk", @"out", @"toc", @"lof", @"lot",
+             @"bbl", @"blg", @"bcf", @"run.xml", @"nav", @"snm", @"vrb", @"idx", @"ilg", @"ind", @"xdv"];
+}
 
++ (void)cleanAuxiliaryFilesForTeXFileURL:(NSURL *)texURL {
+    NSString *dir = [texURL URLByDeletingLastPathComponent].path;
+    NSString *base = [texURL.URLByDeletingPathExtension lastPathComponent];
     NSFileManager *fm = [NSFileManager defaultManager];
-    for (NSString *ext in extensions) {
+    for (NSString *ext in [self auxiliaryExtensions]) {
         NSString *auxPath = [dir stringByAppendingPathComponent:[base stringByAppendingPathExtension:ext]];
         if ([fm fileExistsAtPath:auxPath]) {
             [fm removeItemAtPath:auxPath error:nil];

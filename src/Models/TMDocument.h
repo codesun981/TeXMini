@@ -25,7 +25,11 @@ NS_ASSUME_NONNULL_BEGIN
 /// 暂存保存：写入临时文件以便编译，保留 isDirty，标记 isScratch。
 - (BOOL)saveScratchToURL:(NSURL *)url error:(NSError **)error;
 - (BOOL)saveCurrentFileWithError:(NSError **)error;
+/// 删除自身同名的辅助文件（.aux/.log/.bbl/… 见 auxiliaryExtensions），保留 PDF。
 - (void)cleanAuxiliaryFiles;
+/// 删除 texURL 同名的辅助文件；编译主文件与当前文件不同时应传主文件。
++ (void)cleanAuxiliaryFilesForTeXFileURL:(NSURL *)texURL;
++ (NSArray<NSString *> *)auxiliaryExtensions;
 
 @end
 

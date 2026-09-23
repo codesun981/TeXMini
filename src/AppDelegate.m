@@ -142,6 +142,8 @@
     NSMenuItem *compileMenuItem = [[NSMenuItem alloc] init];
     NSMenu *compileMenu = [[NSMenu alloc] initWithTitle:@"编译"];
     [compileMenu addItemWithTitle:@"保存并编译" action:@selector(compileDocumentAction:) keyEquivalent:@"b"];
+    NSMenuItem *cleanBuild = [compileMenu addItemWithTitle:@"清理并重新编译" action:@selector(cleanAndRebuildAction:) keyEquivalent:@"b"];
+    cleanBuild.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [compileMenu addItemWithTitle:@"取消编译" action:@selector(cancelCompileAction:) keyEquivalent:@"."];
     [compileMenu addItemWithTitle:@"自动编译（停止输入后）" action:@selector(toggleAutoCompileAction:) keyEquivalent:@""];
     [compileMenu addItemWithTitle:@"允许 Shell Escape (-shell-escape)" action:@selector(toggleShellEscapeAction:) keyEquivalent:@""];
@@ -343,7 +345,11 @@
 }
 
 - (void)cleanAuxAction:(id)sender {
-    [self.mainWindowController.documentModel cleanAuxiliaryFiles];
+    [self.mainWindowController cleanAuxiliaryFilesForMainFile];
+}
+
+- (void)cleanAndRebuildAction:(id)sender {
+    [self.mainWindowController cleanAndRebuild];
 }
 
 - (void)toggleOutlineAction:(id)sender {

@@ -20,6 +20,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// 当前项目根目录（文件浏览器的根）。
 @property (nonatomic, strong, readonly, nullable) NSURL *projectRootURL;
 - (void)compileCurrentDocument;
+/// 删主文件的辅助文件后重新编译（aux 损坏、换 bib 后引用不更新时用）。
+- (void)cleanAndRebuild;
+- (void)cleanAuxiliaryFilesForMainFile;
 - (void)cancelCompilation;
 - (BOOL)isCompiling;
 /// 弹出存储面板，把 currentPDFURL 复制到用户选定位置。返回 YES 表示已导出。

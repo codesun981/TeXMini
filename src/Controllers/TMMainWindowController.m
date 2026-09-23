@@ -1251,7 +1251,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     } else if ([itemIdentifier isEqualToString:@"CleanAux"]) {
         item.label = @"清理";
         item.paletteLabel = @"清理缓存文件";
-        item.toolTip = @"清理 .aux、.log、.fls 等缓存文件";
+        item.toolTip = @"清理 .aux、.log、.bbl 等辅助文件 (⌘K)；⌥⌘B 清理后重新编译";
         item.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"Clean"];
         item.target = self;
         item.action = @selector(cleanAuxFilesAction:);
@@ -1342,8 +1342,23 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 }
 
 - (void)cleanAuxFilesAction:(id)sender {
-    [self.documentModel cleanAuxiliaryFiles];
-    [self.statusBar showReadyState];
+    [self cleanAuxiliaryFilesForMainFile];
+    [self.statusBar showInfoMessage:@"已清理辅助文件"];
+}
+
+/// 清理的是实际编译的主文件（用 % !TEX root 或多文件项目时不是当前文件）。
+- (void)cleanAuxiliaryFilesForMainFile {
+    NSURL *main = [self mainFileURLForCompile];
+    if (!main) return;
+    [TMDocument cleanAuxiliaryFilesForTeXFileURL:main];
+    if (![main isEqual:self.documentModel.fileURL]) [self.documentModel cleanAuxiliaryFiles];
+    [self.outlineSidebarView.fileBrowserView reload];
+}
+
+- (void)cleanAndRebuild {
+    if ([self isCompiling]) [self cancelCompilation];
+    [self cleanAuxiliaryFilesForMainFile];
+    [self compileCurrentDocument];
 }
 
 - (void)exportPDFToolbarAction:(id)sender {
