@@ -20,6 +20,8 @@
 
 ### 第一梯队：所有对手都有、代价小、每天都用
 
+> **状态：已于 2026-09-23 在分支 feature/tier1-usability 全部实现**（7 个 commit）。下面保留原始分析。
+
 1. **可点击的错误/警告列表 + 行号槽标记**
    现状是纯文本日志和"跳到第一个错误"。六个编辑器全部提供解析后的问题列表，点一条跳一行；TeXstudio / Texmaker 还在行号槽标红。`TMLogParser` 已产出 `TMLogIssue`，只差一个 `NSTableView` 和 `TMLineNumberRulerView` 里画标记。
 2. **极简偏好窗口（⌘,）**
