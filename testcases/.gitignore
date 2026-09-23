@@ -30,3 +30,9 @@ svg-inkscape/
 
 # 例外：作为素材的 PDF 需要入库
 !_assets/external-diagram.pdf
+
+# 由脚本生成的输入文件
+10-large-document/big.tex
+11-encoding-and-edge-cases/latin1.tex
+11-encoding-and-edge-cases/crlf.tex
+11-encoding-and-edge-cases/empty.tex
