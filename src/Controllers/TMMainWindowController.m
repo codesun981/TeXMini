@@ -502,6 +502,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         self.editorTextView.softWrapEnabled = p.softWrapEnabled;
     }
     self.pdfView.inverted = p.pdfInverted;
+    self.editorTextView.highlightsCurrentLine = p.highlightsCurrentLine;
 
     _autoCompileEnabled = p.autoCompileEnabled;
     if (!_autoCompileEnabled) {

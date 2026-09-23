@@ -4,10 +4,15 @@
 
 static NSString *const kTMIndentUnit = @"  ";
 
-@implementation TMEditorTextView
+@implementation TMEditorTextView {
+    /// 当前配对括号的两个 1 字符 range（临时属性），选区变化时清掉重画。
+    NSRange _bracketRanges[2];
+    BOOL _hasBracketHighlight;
+}
 
 - (void)setupEditor {
     _softWrapEnabled = YES;
+    _highlightsCurrentLine = YES;
     self.allowsUndo = YES;
     self.automaticQuoteSubstitutionEnabled = NO;
     self.automaticDashSubstitutionEnabled = NO;
@@ -137,6 +142,7 @@ static unichar TMMatchingBracket(unichar c) {
 }
 
 - (void)flashMatchingBracketForCursorAt:(NSUInteger)loc {
+    [self clearBracketHighlight];
     NSString *text = self.string;
     NSUInteger candidate = NSNotFound;
     // 优先看光标左边的字符（刚输入完的闭合括号），其次看右边
@@ -153,8 +159,75 @@ static unichar TMMatchingBracket(unichar c) {
 
     NSUInteger match = [self matchingBracketIndexForIndex:candidate];
     if (match != NSNotFound) {
-        [self showFindIndicatorForRange:NSMakeRange(match, 1)];
+        [self setBracketHighlightAt:candidate and:match];
     }
+}
+
+#pragma mark - 括号常驻高亮（临时属性，不进 textStorage / 撤销栈）
+
+- (void)setBracketHighlightAt:(NSUInteger)a and:(NSUInteger)b {
+    NSColor *bg = [[NSColor controlAccentColor] colorWithAlphaComponent:0.28];
+    _bracketRanges[0] = NSMakeRange(a, 1);
+    _bracketRanges[1] = NSMakeRange(b, 1);
+    _hasBracketHighlight = YES;
+    for (int i = 0; i < 2; i++) {
+        [self.layoutManager addTemporaryAttribute:NSBackgroundColorAttributeName value:bg forCharacterRange:_bracketRanges[i]];
+    }
+}
+
+- (void)clearBracketHighlight {
+    if (!_hasBracketHighlight) return;
+    _hasBracketHighlight = NO;
+    NSUInteger len = self.string.length;
+    for (int i = 0; i < 2; i++) {
+        if (NSMaxRange(_bracketRanges[i]) <= len) {
+            [self.layoutManager removeTemporaryAttribute:NSBackgroundColorAttributeName forCharacterRange:_bracketRanges[i]];
+        }
+    }
+}
+
+#pragma mark - 当前行高亮
+
+- (void)setHighlightsCurrentLine:(BOOL)highlightsCurrentLine {
+    _highlightsCurrentLine = highlightsCurrentLine;
+    [self setNeedsDisplay:YES];
+}
+
+/// 光标所在视觉行（自动换行时是行片段）在视图坐标里的横贯整宽的矩形。
+- (NSRect)currentLineRectForCharacterIndex:(NSUInteger)index {
+    NSLayoutManager *lm = self.layoutManager;
+    NSUInteger length = self.string.length;
+    NSRect r;
+    if (length == 0 || (index >= length && [self.string hasSuffix:@"\n"])) {
+        r = lm.extraLineFragmentRect;
+        if (NSIsEmptyRect(r)) {
+            // 空文档：用字体行高凑一个
+            r = NSMakeRect(0, 0, self.bounds.size.width, [lm defaultLineHeightForFont:self.font ?: [NSFont userFixedPitchFontOfSize:13]]);
+        }
+    } else {
+        NSUInteger glyph = [lm glyphIndexForCharacterAtIndex:MIN(index, length - 1)];
+        r = [lm lineFragmentRectForGlyphAtIndex:glyph effectiveRange:NULL];
+    }
+    r.origin.y += self.textContainerInset.height;
+    r.origin.x = 0;
+    r.size.width = MAX(self.bounds.size.width, self.enclosingScrollView.contentSize.width);
+    return r;
+}
+
+- (void)drawViewBackgroundInRect:(NSRect)rect {
+    [super drawViewBackgroundInRect:rect];
+    if (!self.highlightsCurrentLine) return;
+    NSRange sel = self.selectedRange;
+    if (sel.length > 0) return;
+    NSRect line = [self currentLineRectForCharacterIndex:sel.location];
+    if (!NSIntersectsRect(line, rect)) return;
+    [[[NSColor controlAccentColor] colorWithAlphaComponent:0.07] setFill];
+    NSRectFillUsingOperation(line, NSCompositingOperationSourceOver);
+}
+
+- (void)invalidateCurrentLineHighlightForSelection:(NSRange)sel {
+    if (!self.highlightsCurrentLine) return;
+    [self setNeedsDisplayInRect:[self currentLineRectForCharacterIndex:sel.location]];
 }
 
 - (void)textStorageDidProcessEditingNotification:(NSNotification *)note {
@@ -480,12 +553,17 @@ static unichar TMMatchingBracket(unichar c) {
 #pragma mark - 光标行列位置更新
 
 - (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges affinity:(NSSelectionAffinity)affinity stillSelecting:(BOOL)stillSelecting {
+    NSRange previous = self.selectedRange;
     [super setSelectedRanges:selectedRanges affinity:affinity stillSelecting:stillSelecting];
 
     if (selectedRanges.count > 0) {
         NSRange sel = selectedRanges.firstObject.rangeValue;
         NSString *text = self.string;
         NSUInteger loc = MIN(sel.location, text.length);
+
+        // 旧行与新行都要重画底色
+        [self invalidateCurrentLineHighlightForSelection:NSMakeRange(MIN(previous.location, text.length), 0)];
+        [self invalidateCurrentLineHighlightForSelection:NSMakeRange(loc, 0)];
 
         NSUInteger line = 1;
         NSUInteger col = 1;
@@ -505,6 +583,8 @@ static unichar TMMatchingBracket(unichar c) {
 
         if (sel.length == 0 && !stillSelecting) {
             [self flashMatchingBracketForCursorAt:loc];
+        } else {
+            [self clearBracketHighlight];
         }
     }
 }

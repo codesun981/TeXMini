@@ -31,6 +31,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *editorFontName;
 /// 自动换行；关闭后出现横向滚动条。默认 YES。
 @property (nonatomic, assign) BOOL softWrapEnabled;
+/// 光标所在行淡淡的底色。默认 YES。
+@property (nonatomic, assign) BOOL highlightsCurrentLine;
 
 /// 以下动作作用于选区覆盖的整行，可撤销。
 - (IBAction)toggleComment:(nullable id)sender;
