@@ -1,4 +1,6 @@
 #import "TMPDFView.h"
+#import <QuartzCore/QuartzCore.h>
+#import <CoreImage/CoreImage.h>
 
 @interface TMHighlightOverlayView : NSView
 @end
@@ -24,6 +26,49 @@
     self.displaysPageBreaks = YES;
     self.autoScales = YES;
     self.backgroundColor = [NSColor windowBackgroundColor];
+    self.wantsLayer = YES;
+}
+
+#pragma mark - 反色
+
+- (void)setInverted:(BOOL)inverted {
+    if (_inverted == inverted) return;
+    _inverted = inverted;
+    if (inverted) {
+        CIFilter *invert = [CIFilter filterWithName:@"CIColorInvert"];
+        CIFilter *hue = [CIFilter filterWithName:@"CIHueAdjust"];
+        [hue setValue:@(M_PI) forKey:kCIInputAngleKey];
+        self.contentFilters = @[invert, hue];
+        // 固定用浅灰做页间背景，取反后是深灰；不能用随系统变化的 windowBackgroundColor
+        self.backgroundColor = [NSColor colorWithWhite:0.86 alpha:1.0];
+    } else {
+        self.contentFilters = @[];
+        self.backgroundColor = [NSColor windowBackgroundColor];
+    }
+}
+
+#pragma mark - 查找（交给控制器的搜索栏）
+
+- (void)performTextFinderAction:(nullable id)sender {
+    NSInteger tag = [sender respondsToSelector:@selector(tag)] ? [sender tag] : NSTextFinderActionShowFindInterface;
+    if (tag == NSTextFinderActionNextMatch || tag == NSTextFinderActionPreviousMatch) {
+        if ([self.syncDelegate respondsToSelector:@selector(pdfViewDidRequestFindNext:)]) {
+            [self.syncDelegate pdfViewDidRequestFindNext:(tag == NSTextFinderActionNextMatch)];
+        }
+        return;
+    }
+    if ([self.syncDelegate respondsToSelector:@selector(pdfViewDidRequestFindInterface)]) {
+        [self.syncDelegate pdfViewDidRequestFindInterface];
+    }
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
+    if (menuItem.action == @selector(performTextFinderAction:)) {
+        NSInteger tag = menuItem.tag;
+        return self.document != nil &&
+               (tag == NSTextFinderActionShowFindInterface || tag == NSTextFinderActionNextMatch || tag == NSTextFinderActionPreviousMatch);
+    }
+    return [super validateMenuItem:menuItem];
 }
 
 - (void)loadPDFFromURL:(NSURL *)url {

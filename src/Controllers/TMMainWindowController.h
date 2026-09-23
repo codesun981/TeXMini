@@ -50,6 +50,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)pdfActualSize;
 - (BOOL)hasPDF;
 - (void)printPDF;
+/// 显示 PDF 内查找栏（⇧⌘F；PDF 有焦点时 ⌘F 也走这里）。
+- (void)showPDFSearchBar;
+- (void)hidePDFSearchBar;
+- (BOOL)isPDFInverted;
 - (void)increaseEditorFontSize;
 - (void)decreaseEditorFontSize;
 - (void)resetEditorFontSize;

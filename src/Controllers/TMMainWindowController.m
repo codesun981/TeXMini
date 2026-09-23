@@ -34,6 +34,12 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 @property (nonatomic, strong) NSView *pdfContainerView;
 @property (nonatomic, strong) TMPDFView *pdfView;
 @property (nonatomic, strong) NSView *pdfPlaceholderView;
+// PDF 内查找栏
+@property (nonatomic, strong) NSView *pdfSearchBar;
+@property (nonatomic, strong) NSSearchField *pdfSearchField;
+@property (nonatomic, strong) NSTextField *pdfSearchCountLabel;
+@property (nonatomic, copy) NSArray<PDFSelection *> *pdfSearchResults;
+@property (nonatomic, assign) NSInteger pdfSearchIndex;
 @property (nonatomic, strong) TMStatusBarView *statusBar;
 @property (nonatomic, strong) TMLogDrawerView *logDrawer;
 
@@ -196,6 +202,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     // 占位视图 (当未编译出 PDF 时显示提示)
     [self setupPlaceholderView];
     [_pdfContainerView addSubview:_pdfPlaceholderView];
+    [self setupPDFSearchBar];
 
     [_splitView addSubview:_pdfContainerView];
 
@@ -296,6 +303,179 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     self.window.toolbarStyle = NSWindowToolbarStyleUnified;
 }
 
+#pragma mark - PDF 内查找
+
+static const CGFloat kTMPDFSearchBarHeight = 34.0;
+
+- (void)setupPDFSearchBar {
+    NSRect b = _pdfContainerView.bounds;
+    _pdfSearchBar = [[NSView alloc] initWithFrame:NSMakeRect(0, NSMaxY(b) - kTMPDFSearchBarHeight, b.size.width, kTMPDFSearchBarHeight)];
+    _pdfSearchBar.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    _pdfSearchBar.wantsLayer = YES;
+    _pdfSearchBar.layer.backgroundColor = [NSColor windowBackgroundColor].CGColor;
+    _pdfSearchBar.hidden = YES;
+
+    _pdfSearchField = [[NSSearchField alloc] initWithFrame:NSZeroRect];
+    _pdfSearchField.placeholderString = @"在 PDF 中查找";
+    _pdfSearchField.controlSize = NSControlSizeSmall;
+    _pdfSearchField.font = [NSFont systemFontOfSize:12];
+    _pdfSearchField.sendsSearchStringImmediately = NO;
+    _pdfSearchField.sendsWholeSearchString = YES;
+    _pdfSearchField.target = self;
+    _pdfSearchField.action = @selector(pdfSearchFieldAction:);
+    _pdfSearchField.delegate = (id)self;
+    _pdfSearchField.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _pdfSearchCountLabel = [NSTextField labelWithString:@""];
+    _pdfSearchCountLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _pdfSearchCountLabel.textColor = [NSColor secondaryLabelColor];
+    _pdfSearchCountLabel.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSButton *prev = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"chevron.up" accessibilityDescription:@"上一个"] target:self action:@selector(pdfSearchPreviousAction:)];
+    NSButton *next = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"chevron.down" accessibilityDescription:@"下一个"] target:self action:@selector(pdfSearchNextAction:)];
+    NSButton *done = [NSButton buttonWithTitle:@"完成" target:self action:@selector(hidePDFSearchBar)];
+    for (NSButton *btn in @[prev, next, done]) {
+        btn.bezelStyle = NSBezelStyleAccessoryBarAction;
+        btn.controlSize = NSControlSizeSmall;
+        btn.font = [NSFont systemFontOfSize:11];
+        btn.translatesAutoresizingMaskIntoConstraints = NO;
+        [_pdfSearchBar addSubview:btn];
+    }
+    prev.toolTip = @"上一个 (⇧⌘G)";
+    next.toolTip = @"下一个 (⌘G)";
+    [_pdfSearchBar addSubview:_pdfSearchField];
+    [_pdfSearchBar addSubview:_pdfSearchCountLabel];
+
+    NSBox *line = [[NSBox alloc] init];
+    line.boxType = NSBoxSeparator;
+    line.translatesAutoresizingMaskIntoConstraints = NO;
+    [_pdfSearchBar addSubview:line];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_pdfSearchField.leadingAnchor constraintEqualToAnchor:_pdfSearchBar.leadingAnchor constant:8],
+        [_pdfSearchField.centerYAnchor constraintEqualToAnchor:_pdfSearchBar.centerYAnchor],
+        [_pdfSearchField.widthAnchor constraintGreaterThanOrEqualToConstant:160],
+        [_pdfSearchCountLabel.leadingAnchor constraintEqualToAnchor:_pdfSearchField.trailingAnchor constant:8],
+        [_pdfSearchCountLabel.centerYAnchor constraintEqualToAnchor:_pdfSearchBar.centerYAnchor],
+        [prev.leadingAnchor constraintEqualToAnchor:_pdfSearchCountLabel.trailingAnchor constant:8],
+        [prev.centerYAnchor constraintEqualToAnchor:_pdfSearchBar.centerYAnchor],
+        [next.leadingAnchor constraintEqualToAnchor:prev.trailingAnchor constant:2],
+        [next.centerYAnchor constraintEqualToAnchor:_pdfSearchBar.centerYAnchor],
+        [done.trailingAnchor constraintEqualToAnchor:_pdfSearchBar.trailingAnchor constant:-8],
+        [done.centerYAnchor constraintEqualToAnchor:_pdfSearchBar.centerYAnchor],
+        [_pdfSearchField.trailingAnchor constraintLessThanOrEqualToAnchor:done.leadingAnchor constant:-120],
+        [line.leadingAnchor constraintEqualToAnchor:_pdfSearchBar.leadingAnchor],
+        [line.trailingAnchor constraintEqualToAnchor:_pdfSearchBar.trailingAnchor],
+        [line.bottomAnchor constraintEqualToAnchor:_pdfSearchBar.bottomAnchor],
+        [line.heightAnchor constraintEqualToConstant:1]
+    ]];
+    [_pdfContainerView addSubview:_pdfSearchBar];
+}
+
+- (void)showPDFSearchBar {
+    if (!self.pdfView.document) {
+        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘B 编译"];
+        return;
+    }
+    if (self.pdfSearchBar.hidden) {
+        self.pdfSearchBar.hidden = NO;
+        NSRect f = self.pdfContainerView.bounds;
+        f.size.height -= kTMPDFSearchBarHeight;
+        self.pdfView.frame = f;
+    }
+    [self.window makeFirstResponder:self.pdfSearchField];
+    [self.pdfSearchField selectText:nil];
+}
+
+- (void)hidePDFSearchBar {
+    if (self.pdfSearchBar.hidden) return;
+    self.pdfSearchBar.hidden = YES;
+    self.pdfView.frame = self.pdfContainerView.bounds;
+    self.pdfSearchResults = @[];
+    self.pdfView.highlightedSelections = nil;
+    [self.window makeFirstResponder:self.pdfView];
+}
+
+- (void)pdfViewDidRequestFindInterface {
+    [self showPDFSearchBar];
+}
+
+- (void)pdfViewDidRequestFindNext:(BOOL)forward {
+    if (self.pdfSearchBar.hidden || self.pdfSearchResults.count == 0) { [self showPDFSearchBar]; return; }
+    [self stepPDFSearch:forward ? 1 : -1];
+}
+
+/// 逐字查找由 controlTextDidChange: 负责，回车由 doCommandBySelector: 负责；
+/// 这里只剩点清除按钮（内容清空）的情况。
+- (void)pdfSearchFieldAction:(id)sender {
+    [self runPDFSearchScrollToFirst:YES];
+}
+
+- (void)controlTextDidChange:(NSNotification *)note {
+    if (note.object == self.pdfSearchField) [self runPDFSearchScrollToFirst:YES];
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    if (control != self.pdfSearchField) return NO;
+    if (commandSelector == @selector(cancelOperation:)) { [self hidePDFSearchBar]; return YES; }
+    if (commandSelector == @selector(insertNewline:)) {
+        NSEvent *ev = NSApp.currentEvent;
+        if (self.pdfSearchResults.count == 0) [self runPDFSearchScrollToFirst:YES];
+        else [self stepPDFSearch:(ev.modifierFlags & NSEventModifierFlagShift) ? -1 : 1];
+        return YES;
+    }
+    return NO;
+}
+
+- (void)runPDFSearchScrollToFirst:(BOOL)scroll {
+    NSString *query = self.pdfSearchField.stringValue;
+    PDFDocument *doc = self.pdfView.document;
+    if (!doc || query.length == 0) {
+        self.pdfSearchResults = @[];
+        self.pdfView.highlightedSelections = nil;
+        self.pdfSearchCountLabel.stringValue = @"";
+        return;
+    }
+    NSArray<PDFSelection *> *results = [doc findString:query withOptions:NSCaseInsensitiveSearch];
+    self.pdfSearchResults = results;
+    for (PDFSelection *s in results) s.color = [[NSColor systemYellowColor] colorWithAlphaComponent:0.5];
+    self.pdfView.highlightedSelections = results;
+    self.pdfSearchIndex = -1;
+    if (results.count == 0) {
+        self.pdfSearchCountLabel.stringValue = @"无结果";
+        return;
+    }
+    if (scroll) {
+        // 从当前页开始找第一个命中，而不是总跳回第一页
+        PDFPage *current = self.pdfView.currentPage;
+        NSUInteger currentIdx = current ? [doc indexForPage:current] : 0;
+        NSInteger start = 0;
+        for (NSUInteger i = 0; i < results.count; i++) {
+            PDFPage *p = results[i].pages.firstObject;
+            if (p && [doc indexForPage:p] >= currentIdx) { start = (NSInteger)i; break; }
+        }
+        self.pdfSearchIndex = start - 1;
+        [self stepPDFSearch:1];
+    }
+}
+
+- (void)stepPDFSearch:(NSInteger)delta {
+    NSInteger n = (NSInteger)self.pdfSearchResults.count;
+    if (n == 0) return;
+    self.pdfSearchIndex = ((self.pdfSearchIndex + delta) % n + n) % n;
+    PDFSelection *sel = self.pdfSearchResults[self.pdfSearchIndex];
+    self.pdfView.currentSelection = sel;
+    [self.pdfView scrollSelectionToVisible:nil];
+    self.pdfSearchCountLabel.stringValue = [NSString stringWithFormat:@"%ld / %ld", (long)self.pdfSearchIndex + 1, (long)n];
+}
+
+- (void)pdfSearchNextAction:(id)sender { [self stepPDFSearch:1]; }
+- (void)pdfSearchPreviousAction:(id)sender { [self stepPDFSearch:-1]; }
+
+- (BOOL)isPDFInverted {
+    return self.pdfView.inverted;
+}
+
 #pragma mark - 偏好应用
 
 - (void)preferencesDidChange:(NSNotification *)note {
@@ -321,6 +501,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     if (self.editorTextView.softWrapEnabled != p.softWrapEnabled) {
         self.editorTextView.softWrapEnabled = p.softWrapEnabled;
     }
+    self.pdfView.inverted = p.pdfInverted;
 
     _autoCompileEnabled = p.autoCompileEnabled;
     if (!_autoCompileEnabled) {
@@ -923,6 +1104,8 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     self.currentPDFURL = pdfURL;
     self.pdfPlaceholderView.hidden = YES;
     [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
+    // 搜索栏开着时对新 PDF 重新查找，高亮不丢
+    if (!self.pdfSearchBar.hidden) [self runPDFSearchScrollToFirst:NO];
     [self.outlineSidebarView.fileBrowserView reload];
     [self runPendingAutoCompileIfNeeded];
 }

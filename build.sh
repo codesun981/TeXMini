@@ -15,6 +15,8 @@ mkdir -p "${RESOURCES_DIR}"
 clang -fobjc-arc -O2 \
     -framework Cocoa \
     -framework PDFKit \
+    -framework QuartzCore \
+    -framework CoreImage \
     -framework UniformTypeIdentifiers \
     -lz \
     -Ivendor/synctex \

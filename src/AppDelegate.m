@@ -168,6 +168,10 @@
     prevPage.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     NSMenuItem *nextPage = [viewMenu addItemWithTitle:@"下一页" action:@selector(pdfNextPageAction:) keyEquivalent:[NSString stringWithFormat:@"%C", (unichar)NSDownArrowFunctionKey]];
     nextPage.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *pdfFind = [viewMenu addItemWithTitle:@"在 PDF 中查找…" action:@selector(pdfFindAction:) keyEquivalent:@"F"];
+    pdfFind.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    NSMenuItem *pdfInvert = [viewMenu addItemWithTitle:@"PDF 反色（深色阅读）" action:@selector(togglePDFInvertAction:) keyEquivalent:@"i"];
+    pdfInvert.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [viewMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *fontUp = [viewMenu addItemWithTitle:@"编辑器字体放大" action:@selector(editorFontUpAction:) keyEquivalent:@"="];
     fontUp.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
@@ -331,6 +335,13 @@
         menuItem.state = [TMPreferences shared].softWrapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
     }
+    if (action == @selector(togglePDFInvertAction:)) {
+        menuItem.state = [TMPreferences shared].pdfInverted ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    if (action == @selector(pdfFindAction:)) {
+        return [self.mainWindowController hasPDF];
+    }
     if (action == @selector(exportPDFAction:) || action == @selector(revealPDFAction:)) {
         return self.mainWindowController.currentPDFURL != nil;
     }
@@ -398,6 +409,8 @@
 }
 
 - (void)pdfFitWidthAction:(id)sender { [self.mainWindowController pdfFitWidth]; }
+- (void)pdfFindAction:(id)sender { [self.mainWindowController showPDFSearchBar]; }
+- (void)togglePDFInvertAction:(id)sender { [TMPreferences shared].pdfInverted = ![TMPreferences shared].pdfInverted; }
 - (void)pdfActualSizeAction:(id)sender { [self.mainWindowController pdfActualSize]; }
 - (void)pdfPreviousPageAction:(id)sender { [self.mainWindowController pdfPreviousPage]; }
 - (void)pdfNextPageAction:(id)sender { [self.mainWindowController pdfNextPage]; }
