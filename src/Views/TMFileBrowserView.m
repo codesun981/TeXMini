@@ -1,7 +1,7 @@
 #import "TMFileBrowserView.h"
 #import "TMProject.h"
 
-@interface TMFileBrowserView () <NSOutlineViewDataSource, NSOutlineViewDelegate>
+@interface TMFileBrowserView () <NSOutlineViewDataSource, NSOutlineViewDelegate, NSMenuDelegate>
 @property (nonatomic, strong, readwrite, nullable) NSURL *rootDirectoryURL;
 @property (nonatomic, copy) NSArray<TMFileNode *> *rootNodes;
 @property (nonatomic, strong) NSScrollView *scrollView;
@@ -10,6 +10,8 @@
 @property (nonatomic, strong) NSView *emptyView;
 @property (nonatomic, assign) BOOL isProgrammaticSelection;
 @property (nonatomic, strong, nullable) NSURL *selectedFileURL;
+/// 右键菜单弹出时点中的节点；nil 表示空白处（按根目录处理）。
+@property (nonatomic, strong, nullable) TMFileNode *contextNode;
 @end
 
 @implementation TMFileBrowserView
@@ -52,6 +54,10 @@
     _outlineView.target = self;
     _outlineView.action = @selector(outlineClicked:);
     _outlineView.doubleAction = @selector(outlineDoubleClicked:);
+
+    NSMenu *contextMenu = [[NSMenu alloc] initWithTitle:@"文件"];
+    contextMenu.delegate = self;
+    _outlineView.menu = contextMenu;
 
     NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:@"FileColumn"];
     column.resizingMask = NSTableColumnAutoresizingMask;
@@ -203,6 +209,173 @@
         if ([self.outlineView isItemExpanded:node]) [self.outlineView collapseItem:node];
         else [self.outlineView expandItem:node];
     }
+}
+
+#pragma mark - 右键菜单
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    [menu removeAllItems];
+    if (!self.rootDirectoryURL) return;
+    NSInteger row = self.outlineView.clickedRow;
+    self.contextNode = row >= 0 ? [self.outlineView itemAtRow:row] : nil;
+
+    NSMenuItem *item;
+    item = [menu addItemWithTitle:@"新建 .tex 文件…" action:@selector(newTeXFileAction:) keyEquivalent:@""];
+    item.target = self;
+    item = [menu addItemWithTitle:@"新建 .bib 文件…" action:@selector(newBibFileAction:) keyEquivalent:@""];
+    item.target = self;
+    item = [menu addItemWithTitle:@"新建文件夹…" action:@selector(newFolderAction:) keyEquivalent:@""];
+    item.target = self;
+
+    if (self.contextNode) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        item = [menu addItemWithTitle:@"重命名…" action:@selector(renameAction:) keyEquivalent:@""];
+        item.target = self;
+        item = [menu addItemWithTitle:@"在访达中显示" action:@selector(revealAction:) keyEquivalent:@""];
+        item.target = self;
+        [menu addItem:[NSMenuItem separatorItem]];
+        item = [menu addItemWithTitle:@"移到废纸篓" action:@selector(trashAction:) keyEquivalent:@""];
+        item.target = self;
+    } else {
+        [menu addItem:[NSMenuItem separatorItem]];
+        item = [menu addItemWithTitle:@"在访达中显示项目文件夹" action:@selector(revealAction:) keyEquivalent:@""];
+        item.target = self;
+    }
+}
+
+/// 新建项放在：点中的目录 / 点中文件的所在目录 / 根目录。
+- (NSURL *)directoryForNewItems {
+    TMFileNode *node = self.contextNode;
+    if (!node) return self.rootDirectoryURL;
+    return node.isDirectory ? node.url : node.url.URLByDeletingLastPathComponent;
+}
+
+- (nullable NSString *)promptForNameWithTitle:(NSString *)title message:(NSString *)message defaultName:(NSString *)defaultName {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = message;
+    [alert addButtonWithTitle:@"好"];
+    [alert addButtonWithTitle:@"取消"];
+    NSTextField *field = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
+    field.stringValue = defaultName;
+    alert.accessoryView = field;
+    alert.window.initialFirstResponder = field;
+    // 选中扩展名之前的部分，方便直接输入新名字
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSText *editor = [field currentEditor];
+        NSUInteger dot = [defaultName rangeOfString:@"." options:NSBackwardsSearch].location;
+        if (editor) [editor setSelectedRange:NSMakeRange(0, dot == NSNotFound ? defaultName.length : dot)];
+    });
+    if ([alert runModal] != NSAlertFirstButtonReturn) return nil;
+    NSString *name = [field.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (name.length == 0 || [name containsString:@"/"] || [name isEqualToString:@"."] || [name isEqualToString:@".."]) {
+        NSBeep();
+        return nil;
+    }
+    return name;
+}
+
+- (void)showError:(NSError *)error fallback:(NSString *)fallback {
+    NSAlert *alert = error ? [NSAlert alertWithError:error] : [[NSAlert alloc] init];
+    if (!error) alert.messageText = fallback;
+    [alert runModal];
+}
+
+- (void)createFileWithExtension:(NSString *)ext initialContent:(NSString *)content {
+    NSURL *dir = [self directoryForNewItems];
+    NSString *name = [self promptForNameWithTitle:[NSString stringWithFormat:@"新建 .%@ 文件", ext]
+                                          message:[NSString stringWithFormat:@"将创建在 %@", dir.lastPathComponent]
+                                      defaultName:[@"untitled" stringByAppendingPathExtension:ext]];
+    if (!name) return;
+    if (![name.pathExtension.lowercaseString isEqualToString:ext]) name = [name stringByAppendingPathExtension:ext];
+    NSURL *url = [dir URLByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+        [self showError:nil fallback:[NSString stringWithFormat:@"“%@” 已存在", name]];
+        return;
+    }
+    NSError *err = nil;
+    if (![content writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&err]) {
+        [self showError:err fallback:@"无法创建文件"];
+        return;
+    }
+    [self reload];
+    [self selectFileURL:url];
+    if ([self.delegate respondsToSelector:@selector(fileBrowserView:didCreateFileURL:)]) {
+        [self.delegate fileBrowserView:self didCreateFileURL:url];
+    }
+}
+
+- (void)newTeXFileAction:(id)sender {
+    [self createFileWithExtension:@"tex" initialContent:@""];
+}
+
+- (void)newBibFileAction:(id)sender {
+    [self createFileWithExtension:@"bib" initialContent:@""];
+}
+
+- (void)newFolderAction:(id)sender {
+    NSURL *dir = [self directoryForNewItems];
+    NSString *name = [self promptForNameWithTitle:@"新建文件夹" message:[NSString stringWithFormat:@"将创建在 %@", dir.lastPathComponent] defaultName:@"新建文件夹"];
+    if (!name) return;
+    NSError *err = nil;
+    NSURL *url = [dir URLByAppendingPathComponent:name isDirectory:YES];
+    if (![[NSFileManager defaultManager] createDirectoryAtURL:url withIntermediateDirectories:NO attributes:nil error:&err]) {
+        [self showError:err fallback:@"无法创建文件夹"];
+        return;
+    }
+    [self reload];
+    for (TMFileNode *n in [self allNodes:self.rootNodes]) {
+        if (n.isDirectory && [n.url.URLByStandardizingPath.path isEqualToString:url.URLByStandardizingPath.path]) {
+            [self.outlineView expandItem:n];
+            break;
+        }
+    }
+}
+
+- (void)renameAction:(id)sender {
+    TMFileNode *node = self.contextNode;
+    if (!node) return;
+    NSString *name = [self promptForNameWithTitle:@"重命名" message:@"输入新的名字：" defaultName:node.name];
+    if (!name || [name isEqualToString:node.name]) return;
+    NSURL *newURL = [node.url.URLByDeletingLastPathComponent URLByAppendingPathComponent:name];
+    if ([[NSFileManager defaultManager] fileExistsAtPath:newURL.path]) {
+        [self showError:nil fallback:[NSString stringWithFormat:@"“%@” 已存在", name]];
+        return;
+    }
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] moveItemAtURL:node.url toURL:newURL error:&err]) {
+        [self showError:err fallback:@"无法重命名"];
+        return;
+    }
+    if ([self.delegate respondsToSelector:@selector(fileBrowserView:didRenameItemAtURL:toURL:)]) {
+        [self.delegate fileBrowserView:self didRenameItemAtURL:node.url toURL:newURL];
+    }
+    [self reload];
+}
+
+- (void)revealAction:(id)sender {
+    NSURL *url = self.contextNode ? self.contextNode.url : self.rootDirectoryURL;
+    if (url) [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[url]];
+}
+
+- (void)trashAction:(id)sender {
+    TMFileNode *node = self.contextNode;
+    if (!node) return;
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"把“%@”移到废纸篓？", node.name];
+    alert.informativeText = node.isDirectory ? @"文件夹及其中的全部内容都会被移到废纸篓。" : @"可以在废纸篓里找回。";
+    [alert addButtonWithTitle:@"移到废纸篓"];
+    [alert addButtonWithTitle:@"取消"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] trashItemAtURL:node.url resultingItemURL:nil error:&err]) {
+        [self showError:err fallback:@"无法移到废纸篓"];
+        return;
+    }
+    if ([self.delegate respondsToSelector:@selector(fileBrowserView:didTrashItemAtURL:)]) {
+        [self.delegate fileBrowserView:self didTrashItemAtURL:node.url];
+    }
+    [self reload];
 }
 
 #pragma mark - NSOutlineViewDataSource

@@ -8,9 +8,15 @@ NS_ASSUME_NONNULL_BEGIN
 @optional
 /// 用户单击了一个文件（目录的展开/折叠不会触发）。
 - (void)fileBrowserView:(TMFileBrowserView *)browser didSelectFileURL:(NSURL *)url;
+/// 右键「新建」创建了一个文件；控制器一般直接打开它。
+- (void)fileBrowserView:(TMFileBrowserView *)browser didCreateFileURL:(NSURL *)url;
+/// 右键重命名 / 移动了文件或目录；正在编辑的文件若受影响，控制器需更新自己的路径。
+- (void)fileBrowserView:(TMFileBrowserView *)browser didRenameItemAtURL:(NSURL *)oldURL toURL:(NSURL *)newURL;
+/// 右键把文件或目录移到了废纸篓。
+- (void)fileBrowserView:(TMFileBrowserView *)browser didTrashItemAtURL:(NSURL *)url;
 @end
 
-/// 侧边栏“文件”页：以项目根目录为根的轻量文件树。
+/// 侧边栏“文件”页：以项目根目录为根的轻量文件树。右键可新建 / 重命名 / 显示 / 移到废纸篓。
 @interface TMFileBrowserView : NSView
 
 @property (nonatomic, weak, nullable) id<TMFileBrowserViewDelegate> delegate;

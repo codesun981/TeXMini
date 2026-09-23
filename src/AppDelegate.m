@@ -200,6 +200,7 @@
     [menu removeAllItems];
 
     NSArray<NSURL *> *urls = [TMRecentFiles recentFileURLs];
+    NSArray<NSURL *> *folders = [TMRecentFiles recentFolderURLs];
     for (NSURL *url in urls) {
         NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:url.lastPathComponent action:@selector(openRecentAction:) keyEquivalent:@""];
         item.representedObject = url;
@@ -209,7 +210,23 @@
         item.target = self;
         [menu addItem:item];
     }
-    if (urls.count == 0) {
+    if (folders.count > 0) {
+        if (urls.count > 0) [menu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"最近项目文件夹" action:nil keyEquivalent:@""];
+        header.enabled = NO;
+        [menu addItem:header];
+        for (NSURL *url in folders) {
+            NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:url.lastPathComponent action:@selector(openRecentAction:) keyEquivalent:@""];
+            item.representedObject = url;
+            item.toolTip = url.path;
+            item.image = [[NSWorkspace sharedWorkspace] iconForFile:url.path];
+            item.image.size = NSMakeSize(16, 16);
+            item.target = self;
+            item.indentationLevel = 1;
+            [menu addItem:item];
+        }
+    }
+    if (urls.count == 0 && folders.count == 0) {
         NSMenuItem *empty = [[NSMenuItem alloc] initWithTitle:@"无最近项目" action:nil keyEquivalent:@""];
         empty.enabled = NO;
         [menu addItem:empty];
@@ -217,7 +234,7 @@
     [menu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *clear = [[NSMenuItem alloc] initWithTitle:@"清除菜单" action:@selector(clearRecentAction:) keyEquivalent:@""];
     clear.target = self;
-    clear.enabled = urls.count > 0;
+    clear.enabled = urls.count > 0 || folders.count > 0;
     [menu addItem:clear];
 }
 

@@ -87,6 +87,22 @@ TM_TEST(test_clean_auxiliary_files_removes_aux_keeps_pdf_and_tex) {
     TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.run.xml"]]);
 }
 
+TM_TEST(test_recent_folders_are_separate_from_files_and_cleared_together) {
+    [TMRecentFiles clear];
+    [TMRecentFiles noteFileURL:[NSURL fileURLWithPath:@"/tmp/a.tex"]];
+    [TMRecentFiles noteFolderURL:[NSURL fileURLWithPath:@"/tmp/proj"]];
+    [TMRecentFiles noteFolderURL:[NSURL fileURLWithPath:@"/tmp/proj2/"]];
+    [TMRecentFiles noteFolderURL:[NSURL fileURLWithPath:@"/tmp/proj"]];
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFileURLs].count, 1);
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFolderURLs].count, 2);
+    TM_ASSERT_EQ_STR([TMRecentFiles recentFolderURLs].firstObject.path, @"/tmp/proj");
+    [TMRecentFiles removeFolderURL:[NSURL fileURLWithPath:@"/tmp/proj"]];
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFolderURLs].count, 1);
+    [TMRecentFiles clear];
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFolderURLs].count, 0);
+    TM_ASSERT_EQ_INT([TMRecentFiles recentFileURLs].count, 0);
+}
+
 #pragma mark - TMEditActions
 
 TM_TEST(test_toggle_comment_adds_prefix_to_every_line) {

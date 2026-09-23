@@ -514,9 +514,13 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 - (void)openFolderAtURL:(NSURL *)folderURL {
     BOOL isDir = NO;
-    if (![[NSFileManager defaultManager] fileExistsAtPath:folderURL.path isDirectory:&isDir] || !isDir) return;
+    if (![[NSFileManager defaultManager] fileExistsAtPath:folderURL.path isDirectory:&isDir] || !isDir) {
+        [TMRecentFiles removeFolderURL:folderURL];
+        return;
+    }
 
     [self setProjectRootURL:folderURL reload:YES];
+    [TMRecentFiles noteFolderURL:folderURL];
     self.outlineSidebarView.mode = TMSidebarModeFiles;
     if (self.sidebarItem.isCollapsed) [self toggleOutlineSidebar];
 
@@ -542,6 +546,52 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     [self openDocumentAtURL:url];
     // 用户取消了保存提示时，把选中项拨回当前文件
     [browser selectFileURL:self.documentModel.isScratch ? nil : self.documentModel.fileURL];
+}
+
+- (void)fileBrowserView:(TMFileBrowserView *)browser didCreateFileURL:(NSURL *)url {
+    [self openDocumentAtURL:url];
+    [browser selectFileURL:self.documentModel.isScratch ? nil : self.documentModel.fileURL];
+}
+
+/// 当前文件（或其祖先目录）被改名：把 documentModel 的路径映射到新位置，避免下次保存写回旧路径。
+- (void)fileBrowserView:(TMFileBrowserView *)browser didRenameItemAtURL:(NSURL *)oldURL toURL:(NSURL *)newURL {
+    NSURL *current = self.documentModel.fileURL;
+    if (!current || self.documentModel.isScratch) return;
+    NSString *currentPath = current.URLByStandardizingPath.path;
+    NSString *oldPath = oldURL.URLByStandardizingPath.path;
+    NSString *mapped = nil;
+    if ([currentPath isEqualToString:oldPath]) {
+        mapped = newURL.URLByStandardizingPath.path;
+    } else if ([currentPath hasPrefix:[oldPath stringByAppendingString:@"/"]]) {
+        mapped = [newURL.URLByStandardizingPath.path stringByAppendingString:[currentPath substringFromIndex:oldPath.length]];
+    }
+    if (!mapped) return;
+    self.documentModel.fileURL = [NSURL fileURLWithPath:mapped];
+    [self refreshWindowTitle];
+    [self startWatchingCurrentFile];
+    [TMRecentFiles removeFileURL:oldURL];
+    [TMRecentFiles noteFileURL:self.documentModel.fileURL];
+    [browser selectFileURL:self.documentModel.fileURL];
+    [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
+}
+
+/// 当前文件被移到废纸篓：编辑器内容保留，变成未命名文档，下次 ⌘S 走另存为。
+- (void)fileBrowserView:(TMFileBrowserView *)browser didTrashItemAtURL:(NSURL *)url {
+    [TMRecentFiles removeFileURL:url];
+    NSURL *current = self.documentModel.fileURL;
+    if (!current || self.documentModel.isScratch) return;
+    NSString *currentPath = current.URLByStandardizingPath.path;
+    NSString *trashedPath = url.URLByStandardizingPath.path;
+    BOOL affected = [currentPath isEqualToString:trashedPath] || [currentPath hasPrefix:[trashedPath stringByAppendingString:@"/"]];
+    if (!affected) return;
+    [self.fileWatcher stop];
+    self.fileWatcher = nil;
+    self.documentModel.content = self.editorTextView.string;
+    self.documentModel.fileURL = nil;
+    self.documentModel.isDirty = YES;
+    [self refreshWindowTitle];
+    [browser selectFileURL:nil];
+    [self.statusBar showInfoMessage:[NSString stringWithFormat:@"%@ 已移到废纸篓，编辑器内容保留为未命名文档", url.lastPathComponent]];
 }
 
 /// 若 url 处已有 PDF 就载入预览并记为 currentPDFURL；否则显示占位提示。
