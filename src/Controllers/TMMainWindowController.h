@@ -47,6 +47,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)pdfNextPage;
 - (void)pdfPreviousPage;
 - (void)pdfFitWidth;
+- (void)pdfFitPage;
 - (void)pdfActualSize;
 - (BOOL)hasPDF;
 - (void)printPDF;

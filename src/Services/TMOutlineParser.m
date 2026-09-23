@@ -1,4 +1,5 @@
 #import "TMOutlineParser.h"
+#import "TMLaTeXScanner.h"
 
 @implementation TMOutlineParser
 
@@ -37,98 +38,18 @@
         return 1;
     };
 
-    // 辅助函数：判断在当前行的 lineStart 到 loc 之间是否存在未转义的注释符 '%'
-    BOOL (^isCommentedAtLocation)(NSUInteger) = ^BOOL(NSUInteger loc) {
-        NSInteger lineIdx = lineNumberForLocation(loc) - 1;
-        NSUInteger lineStart = [lineStarts[lineIdx] unsignedIntegerValue];
-        BOOL escaped = NO;
-        for (NSUInteger i = lineStart; i < loc; i++) {
-            unichar c = [latexString characterAtIndex:i];
-            if (c == '\\') {
-                escaped = !escaped;
-            } else {
-                if (c == '%' && !escaped) {
-                    return YES;
-                }
-                escaped = NO;
-            }
-        }
-        return NO;
-    };
-
-    // 2. 正则表达式匹配标题命令起始部分：\part, \chapter, \section 等
-    static NSRegularExpression *headingRegex;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        headingRegex = [NSRegularExpression regularExpressionWithPattern:@"\\\\(part|chapter|section|subsection|subsubsection|paragraph)\\*?\\s*\\{"
-                                                                 options:0
-                                                                   error:nil];
-    });
-
+    // 2. 标题由统一扫描器给出：已跳过注释、代码块、\newcommand 定义体，认识 \section[短]{长}、
+    //    包装标题命令的自定义命令以及 beamer 帧标题
     NSMutableArray<TMOutlineItem *> *flatItems = [NSMutableArray array];
-
-    NSArray<NSTextCheckingResult *> *matches = [headingRegex matchesInString:latexString options:0 range:NSMakeRange(0, latexString.length)];
-    for (NSTextCheckingResult *match in matches) {
-        NSUInteger matchLoc = match.range.location;
-
-        // 如果在注释中，则跳过
-        if (isCommentedAtLocation(matchLoc)) {
-            continue;
-        }
-
-        // 提取命令名称确定级别
-        NSRange cmdRange = [match rangeAtIndex:1];
-        NSString *cmdName = [latexString substringWithRange:cmdRange];
-        TMOutlineLevel level = TMOutlineLevelSection;
-        if ([cmdName isEqualToString:@"part"]) level = TMOutlineLevelPart;
-        else if ([cmdName isEqualToString:@"chapter"]) level = TMOutlineLevelChapter;
-        else if ([cmdName isEqualToString:@"section"]) level = TMOutlineLevelSection;
-        else if ([cmdName isEqualToString:@"subsection"]) level = TMOutlineLevelSubsection;
-        else if ([cmdName isEqualToString:@"subsubsection"]) level = TMOutlineLevelSubsubsection;
-        else if ([cmdName isEqualToString:@"paragraph"]) level = TMOutlineLevelParagraph;
-
-        // 找到开括号位置，进行花括号平衡扫描以提取完整标题文本
-        NSUInteger openBraceLoc = match.range.location + match.range.length - 1;
-        NSInteger depth = 1;
-        NSUInteger closeBraceLoc = NSNotFound;
-        BOOL escaped = NO;
-
-        for (NSUInteger i = openBraceLoc + 1; i < latexString.length; i++) {
-            unichar c = [latexString characterAtIndex:i];
-            if (escaped) {
-                escaped = NO;
-                continue;
-            }
-            if (c == '\\') {
-                escaped = YES;
-                continue;
-            }
-            if (c == '{') {
-                depth++;
-            } else if (c == '}') {
-                depth--;
-                if (depth == 0) {
-                    closeBraceLoc = i;
-                    break;
-                }
-            }
-        }
-
-        NSString *rawTitle = @"";
-        if (closeBraceLoc != NSNotFound && closeBraceLoc > openBraceLoc + 1) {
-            rawTitle = [latexString substringWithRange:NSMakeRange(openBraceLoc + 1, closeBraceLoc - openBraceLoc - 1)];
-        }
-
-        NSString *cleanTitle = [self cleanHeadingTitle:rawTitle];
+    for (TMLaTeXHeading *heading in [TMLaTeXScanner scanString:latexString].headings) {
+        NSString *cleanTitle = [self cleanHeadingTitle:heading.rawTitle];
         if (cleanTitle.length == 0) {
-            cleanTitle = [NSString stringWithFormat:@"未命名 %@", cmdName];
+            cleanTitle = [NSString stringWithFormat:@"未命名 %@", heading.commandName];
         }
-
-        NSInteger line = lineNumberForLocation(matchLoc);
         TMOutlineItem *item = [[TMOutlineItem alloc] initWithTitle:cleanTitle
-                                                             level:level
-                                                        lineNumber:line
-                                                      charLocation:matchLoc];
+                                                             level:heading.level
+                                                        lineNumber:lineNumberForLocation(heading.location)
+                                                      charLocation:heading.location];
         [flatItems addObject:item];
     }
 

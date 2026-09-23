@@ -1,4 +1,5 @@
 #import <Cocoa/Cocoa.h>
+#import "TMLaTeXScanner.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -13,6 +14,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 对 range 所在段落（空行分隔）重新着色。
 + (void)highlightTextStorage:(NSTextStorage *)textStorage inRange:(NSRange)range;
+/// 最近一次高亮时对这份文本的扫描结果（括号匹配据此跳过注释和代码块）。
++ (nullable TMLaTeXScanResult *)lastScanForTextStorage:(NSTextStorage *)textStorage;
 
 @end
 

@@ -39,12 +39,14 @@ clang -fobjc-arc -O2 \
     src/Services/TMRecentFiles.m \
     src/Services/TMProject.m \
     src/Services/TMCompletionProvider.m \
+    src/Services/TMLaTeXScanner.m \
     src/Services/TMFileWatcher.m \
     src/Services/TMPreferences.m \
     src/Services/TMFontSettings.m \
     src/Services/TMFontCatalog.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
+    src/Views/TMCompletionPopup.m \
     src/Views/TMDocumentFontView.m \
     src/Views/TMEditorTextView.m \
     src/Views/TMPDFView.m \

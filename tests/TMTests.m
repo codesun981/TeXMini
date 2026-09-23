@@ -10,6 +10,8 @@
 #import "TMCompletionProvider.h"
 #import "TMPreferences.h"
 #import "TMCompiler.h"
+#import "TMOutlineParser.h"
+#import "TMLaTeXScanner.h"
 #import "TMFontSettings.h"
 #import "TMFontCatalog.h"
 
@@ -57,6 +59,7 @@ TM_TEST(test_scratch_save_keeps_document_unnamed_and_dirty) {
     TM_ASSERT_TRUE(doc.isDirty);
     TM_ASSERT_EQ_STR(doc.displayName, @"未命名文档.tex");
     TM_ASSERT_TRUE(doc.fileURL != nil);
+    [[NSFileManager defaultManager] removeItemAtURL:tmp error:nil];
 }
 
 TM_TEST(test_real_save_clears_scratch_and_dirty) {
@@ -69,6 +72,8 @@ TM_TEST(test_real_save_clears_scratch_and_dirty) {
     TM_ASSERT_TRUE(!doc.isScratch);
     TM_ASSERT_TRUE(!doc.isDirty);
     TM_ASSERT_EQ_STR(doc.displayName, @"tmtest_real.tex");
+    [[NSFileManager defaultManager] removeItemAtURL:tmp error:nil];
+    [[NSFileManager defaultManager] removeItemAtURL:real error:nil];
 }
 
 TM_TEST(test_clean_auxiliary_files_removes_aux_keeps_pdf_and_tex) {
@@ -87,6 +92,7 @@ TM_TEST(test_clean_auxiliary_files_removes_aux_keeps_pdf_and_tex) {
     TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.bbl"]]);
     TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.synctex.gz"]]);
     TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.run.xml"]]);
+    [fm removeItemAtPath:dir error:nil];
 }
 
 TM_TEST(test_recent_folders_are_separate_from_files_and_cleared_together) {
@@ -273,7 +279,7 @@ TM_TEST(test_preferences_argument_splitting_handles_quotes_and_whitespace) {
 }
 
 TM_TEST(test_compiler_arguments_include_shell_escape_and_extras_before_filename) {
-    NSArray *args = [TMCompiler argumentsForEngineName:@"xelatex" useLatexmk:YES workingDir:@"/w" fileName:@"m.tex"
+    NSArray *args = [TMCompiler argumentsForEngineName:@"xelatex" useLatexmk:YES outputDir:@"/w" auxDir:nil fileName:@"m.tex"
                                             shellEscape:YES extraArguments:@[@"-outdir=build", @""]];
     TM_ASSERT_EQ_STR(args.firstObject, @"-xelatex");
     TM_ASSERT_TRUE([args containsObject:@"-shell-escape"]);
@@ -281,12 +287,36 @@ TM_TEST(test_compiler_arguments_include_shell_escape_and_extras_before_filename)
     TM_ASSERT_EQ_STR(args.lastObject, @"m.tex");
     TM_ASSERT_EQ_INT([args indexOfObject:@"-shell-escape"] < [args indexOfObject:@"-outdir=build"], 1);
 
-    NSArray *plain = [TMCompiler argumentsForEngineName:@"pdflatex" useLatexmk:NO workingDir:@"/w" fileName:@"m.tex"
+    NSArray *plain = [TMCompiler argumentsForEngineName:@"pdflatex" useLatexmk:NO outputDir:@"/w" auxDir:nil fileName:@"m.tex"
                                              shellEscape:NO extraArguments:nil];
     TM_ASSERT_TRUE(![plain containsObject:@"-shell-escape"]);
     TM_ASSERT_TRUE(![plain containsObject:@"-pdf"]);
     TM_ASSERT_EQ_STR(plain.firstObject, @"-synctex=1");
-    TM_ASSERT_EQ_STR([TMCompiler argumentsForEngineName:@"lualatex" useLatexmk:YES workingDir:@"/w" fileName:@"m.tex" shellEscape:NO extraArguments:nil].firstObject, @"-lualatex");
+    TM_ASSERT_EQ_STR([TMCompiler argumentsForEngineName:@"lualatex" useLatexmk:YES outputDir:@"/w" auxDir:nil fileName:@"m.tex" shellEscape:NO extraArguments:nil].firstObject, @"-lualatex");
+}
+
+TM_TEST(test_compiler_arguments_separate_aux_dir) {
+    NSArray *mk = [TMCompiler argumentsForEngineName:@"pdflatex" useLatexmk:YES outputDir:@"/src" auxDir:@"/cache/m" fileName:@"m.tex"
+                                          shellEscape:NO extraArguments:nil];
+    TM_ASSERT_TRUE([mk containsObject:@"-outdir=/src"]);
+    TM_ASSERT_TRUE([mk containsObject:@"-auxdir=/cache/m"]);
+
+    // 引擎直跑只有一个输出目录：全部进缓存
+    NSArray *plain = [TMCompiler argumentsForEngineName:@"pdflatex" useLatexmk:NO outputDir:@"/src" auxDir:@"/cache/m" fileName:@"m.tex"
+                                             shellEscape:NO extraArguments:nil];
+    TM_ASSERT_TRUE([plain containsObject:@"-output-directory=/cache/m"]);
+
+    NSArray *beside = [TMCompiler argumentsForEngineName:@"pdflatex" useLatexmk:YES outputDir:@"/src" auxDir:nil fileName:@"m.tex"
+                                              shellEscape:NO extraArguments:nil];
+    TM_ASSERT_TRUE(![[beside componentsJoinedByString:@" "] containsString:@"-auxdir"]);
+}
+
+TM_TEST(test_aux_directory_is_per_path_and_in_caches) {
+    NSURL *a = [TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:@"/p1/main.tex"]];
+    NSURL *b = [TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:@"/p2/main.tex"]];
+    TM_ASSERT_TRUE(![a isEqual:b]);
+    TM_ASSERT_TRUE([a.path containsString:@"/Caches/TeXMini/build/main-"]);
+    TM_ASSERT_TRUE([a isEqual:[TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:@"/p1/main.tex"]]]);
 }
 
 TM_TEST(test_recent_files_most_recent_first_and_deduplicated) {
@@ -488,6 +518,89 @@ TM_TEST(test_completion_scans_project_bib_and_labels) {
     ctx.kind = TMCompletionKindReference; ctx.partial = @"ch";
     TM_ASSERT_EQ_STR([[p completionsForContext:ctx currentText:@""] componentsJoinedByString:@","], @"ch:intro");
     [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+#pragma mark - 大纲与高亮
+
+TM_TEST(test_outline_follows_custom_heading_macros) {
+    NSString *tex = @"\\newcommand{\\mychapter}[1]{\\section*{#1}\\addcontentsline{toc}{section}{#1}}\n"
+                    @"\\newcommand{\\mysub}[1]{\\subsection*{#1}}\n"
+                    @"\\newcommand{\\mysubsub}[1]{\\subsubsection*{#1}}\n"
+                    @"\\newcommand{\\note}[1]{\\textbf{#1}}\n"
+                    @"\\begin{document}\n"
+                    @"\\mychapter{一、问题重述}\n"
+                    @"\\mysub{1.1 背景}\n"
+                    @"\\mysubsub{1.1.1 细节}\n"
+                    @"\\note{不是标题}\n"
+                    @"\\section{Plain}\n";
+    NSArray<TMOutlineItem *> *flat = nil;
+    [TMOutlineParser parseOutlineFromLaTeXString:tex flatList:&flat];
+    TM_ASSERT_EQ_INT(flat.count, 4);
+    TM_ASSERT_EQ_STR(flat[0].title, @"一、问题重述");
+    TM_ASSERT_EQ_INT(flat[0].level, TMOutlineLevelSection);
+    TM_ASSERT_EQ_STR(flat[1].title, @"1.1 背景");
+    TM_ASSERT_EQ_INT(flat[1].level, TMOutlineLevelSubsection);
+    TM_ASSERT_EQ_INT(flat[2].level, TMOutlineLevelSubsubsection);
+    TM_ASSERT_EQ_INT(flat[2].lineNumber, 8);
+    TM_ASSERT_EQ_STR(flat[3].title, @"Plain");
+}
+
+/// 扫描结果里某一类区域对应的文本
+static NSString *tm_regions(NSString *t, TMLaTeXRegionKind kind) {
+    TMLaTeXScanResult *scan = [TMLaTeXScanner scanString:t];
+    NSMutableArray *found = [NSMutableArray array];
+    for (NSUInteger i = 0; i < scan.regionCount; i++) {
+        if (scan.regions[i].kind == kind) [found addObject:[t substringWithRange:scan.regions[i].range]];
+    }
+    return [found componentsJoinedByString:@","];
+}
+
+static NSString *tm_outlineTitles(NSString *t) {
+    NSArray<TMOutlineItem *> *flat = nil;
+    [TMOutlineParser parseOutlineFromLaTeXString:t flatList:&flat];
+    NSMutableArray *titles = [NSMutableArray array];
+    for (TMOutlineItem *item in flat) [titles addObject:item.title];
+    return [titles componentsJoinedByString:@","];
+}
+
+TM_TEST(test_scanner_dollar_math_pairs_like_tex) {
+    // $a$$b$ 是两段行内公式；\$ 与注释里的 $ 不算；空行结束未闭合的 $
+    NSString *t = @"x $a$$b$ y \\$5 % $ in comment\n$$c$$\nopen $ oops\n\nlater $d$";
+    TM_ASSERT_EQ_STR(tm_regions(t, TMLaTeXRegionMath), @"$a$,$b$,$$c$$,$d$");
+}
+
+TM_TEST(test_scanner_verbatim_and_verb_do_not_leak) {
+    NSString *t = @"\\begin{verbatim}\nprice $5 % not comment\n\\end{verbatim}\nsee \\verb|$%| then $y$ and \\url{a.com/%20} $z$\n";
+    TM_ASSERT_EQ_STR(tm_regions(t, TMLaTeXRegionMath), @"$y$,$z$");
+    TM_ASSERT_EQ_STR(tm_regions(t, TMLaTeXRegionComment), @"");
+    TM_ASSERT_EQ_STR(tm_regions(t, TMLaTeXRegionVerbatim), @"\nprice $5 % not comment\n,\\verb|$%|");
+}
+
+TM_TEST(test_scanner_math_environments_and_brackets) {
+    NSString *t = @"a \\[x\\] b \\(y\\)\n\\begin{align*}\nz \\\\[4pt] w\n\\end{align*}\nrow \\\\[2pt] next\n";
+    TM_ASSERT_EQ_STR(tm_regions(t, TMLaTeXRegionMath), @"\\[x\\],\\(y\\),\\begin{align*}\nz \\\\[4pt] w\n\\end{align*}");
+}
+
+TM_TEST(test_scanner_definition_body_does_not_open_environments) {
+    // 定义体里的 \begin{equation} 不能让后面整篇变成公式
+    NSString *t = @"\\newcommand{\\be}{\\begin{equation}}\n\\newcommand{\\ee}{\\end{equation}}\ntext $q$\n";
+    TM_ASSERT_EQ_STR(tm_regions(t, TMLaTeXRegionMath), @"$q$");
+}
+
+TM_TEST(test_scanner_ignorable_lookup) {
+    NSString *t = @"{a} % {b}\n\\verb|{|";
+    TMLaTeXScanResult *scan = [TMLaTeXScanner scanString:t];
+    TM_ASSERT_TRUE(![scan isIgnorableAtIndex:0]);
+    TM_ASSERT_TRUE([scan isIgnorableAtIndex:[t rangeOfString:@"{b}"].location]);
+    TM_ASSERT_TRUE([scan isIgnorableAtIndex:t.length - 2]);
+}
+
+TM_TEST(test_outline_short_titles_verbatim_and_beamer) {
+    TM_ASSERT_EQ_STR(tm_outlineTitles(@"\\section[短]{很长的标题}\n"), @"很长的标题");
+    TM_ASSERT_EQ_STR(tm_outlineTitles(@"\\begin{verbatim}\n\\section{假的}\n\\end{verbatim}\n\\section{真的}\n"), @"真的");
+    TM_ASSERT_EQ_STR(tm_outlineTitles(@"% \\section{注释里}\n\\section{A}\n"), @"A");
+    TM_ASSERT_EQ_STR(tm_outlineTitles(@"\\section{S}\n\\begin{frame}[t]{帧一}\n\\end{frame}\n\\begin{frame}\n\\frametitle{帧二}\n\\end{frame}\n"), @"S,帧一,帧二");
+    TM_ASSERT_EQ_STR(tm_outlineTitles(@"\\newcommand\\mysec[1]{\\section{#1}}\n\\mysec{A}\n"), @"A");
 }
 
 #pragma mark - TMFontSettings

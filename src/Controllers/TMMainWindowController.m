@@ -20,6 +20,44 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
+static const CGFloat kTMDividerHandleWidth = 10.0;
+
+/// 盖在 代码|PDF 分隔线上的透明拖动条。
+/// 只靠 effectiveRect 扩大热区不够：编辑器的滚动条、文本视图的 I 形光标、PDFView 都会抢走
+/// 分隔线旁边的点击和光标。这个视图是分栏的兄弟且在最上层，光标和拖动都一定先落到它身上。
+@interface TMSplitDividerHandle : NSView
+@property (nonatomic, weak) NSSplitView *splitView;
+@end
+
+@implementation TMSplitDividerHandle
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds cursor:[NSCursor resizeLeftRightCursor]];
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return YES;
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    NSSplitView *splitView = self.splitView;
+    if (splitView.subviews.count < 2) return;
+    // 按下点与分隔线的偏移，拖动时保持不变，避免一按下分隔线就跳到指针处
+    CGFloat grabOffset = [splitView convertPoint:event.locationInWindow fromView:nil].x - NSMaxX(splitView.subviews[0].frame);
+    [[NSCursor resizeLeftRightCursor] push];
+    while (YES) {
+        NSEvent *next = [self.window nextEventMatchingMask:(NSEventMaskLeftMouseDragged | NSEventMaskLeftMouseUp)];
+        if (next.type == NSEventTypeLeftMouseUp) break;
+        CGFloat x = [splitView convertPoint:next.locationInWindow fromView:nil].x - grabOffset;
+        CGFloat minX = [splitView.delegate splitView:splitView constrainMinCoordinate:0 ofSubviewAt:0];
+        CGFloat maxX = [splitView.delegate splitView:splitView constrainMaxCoordinate:0 ofSubviewAt:0];
+        [splitView setPosition:MAX(minX, MIN(x, maxX)) ofDividerAtIndex:0];
+    }
+    [NSCursor pop];
+    [self.window invalidateCursorRectsForView:self];
+}
+
+- (void)mouseDragged:(NSEvent *)event {}
+@end
 
 @interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate>
 
@@ -29,6 +67,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 @property (nonatomic, strong) TMOutlineSidebarView *outlineSidebarView;
 // 内层：代码 | PDF
 @property (nonatomic, strong) NSSplitView *splitView;
+@property (nonatomic, strong) TMSplitDividerHandle *dividerHandle;
 @property (nonatomic, strong) TMEditorTextView *editorTextView;
 @property (nonatomic, strong) NSScrollView *editorScrollView;
 @property (nonatomic, strong) TMLineNumberRulerView *lineNumberRuler;
@@ -58,6 +97,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 /// 上次我们自己读 / 写磁盘文件时的修改时间，用来判断是否有外部改动。
 @property (nonatomic, strong, nullable) NSDate *knownModificationDate;
 @property (nonatomic, assign) BOOL isShowingExternalChangeAlert;
+@property (nonatomic, strong, nullable) NSURL *scratchDirectoryURL;
 /// 用户拒绝过替换的缺失字体：本次会话不再为它们弹窗（自动编译时不反复打扰）。
 @property (nonatomic, strong) NSMutableSet<NSString *> *declinedFontFixes;
 @property (nonatomic, assign) BOOL isShowingFontFixAlert;
@@ -109,8 +149,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         // 首次打开未命名欢迎模板时，暂存到临时目录并触发初次编译，让用户第一眼看到分栏预览。
         // 注意用 saveScratchToURL: 而非 saveToURL:，否则之后 ⌘S 会静默写回 /tmp。
         if (!_documentModel.fileURL) {
-            NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Welcome.tex"];
-            NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
+            NSURL *tmpURL = [self scratchFileURLNamed:@"TeXMini_Welcome.tex"];
             [_documentModel saveScratchToURL:tmpURL error:nil];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self compileCurrentDocument];
@@ -118,6 +157,45 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         }
     }
     return self;
+}
+
+/// 未保存文档的暂存位置。每个窗口一个独立目录，两个未命名窗口不会互相覆盖。
+- (NSURL *)scratchFileURLNamed:(NSString *)name {
+    NSString *root = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini"];
+    // 本进程第一次用暂存目录时，清掉上次退出或崩溃没来得及删的（同一时间只有一个 TeXMini 在跑）
+    static dispatch_once_t sweepOnce;
+    dispatch_once(&sweepOnce, ^{
+        for (NSString *stale in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:root error:nil]) {
+            NSString *path = [root stringByAppendingPathComponent:stale];
+            for (NSString *tex in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:path error:nil]) {
+                if ([tex.pathExtension isEqualToString:@"tex"]) {
+                    [self removeBuildCacheForTeXFileURL:[NSURL fileURLWithPath:[path stringByAppendingPathComponent:tex]]];
+                }
+            }
+            [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+        }
+    });
+    if (!self.scratchDirectoryURL) {
+        NSString *dir = [root stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+        [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+        self.scratchDirectoryURL = [NSURL fileURLWithPath:dir isDirectory:YES];
+    }
+    return [self.scratchDirectoryURL URLByAppendingPathComponent:name];
+}
+
+- (void)removeBuildCacheForTeXFileURL:(NSURL *)texURL {
+    [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:texURL] error:nil];
+}
+
+/// 关窗时删掉这个窗口的暂存目录，以及其中 .tex 在缓存里对应的中间文件目录
+- (void)removeScratchDirectory {
+    NSURL *dir = self.scratchDirectoryURL;
+    if (!dir) return;
+    for (NSURL *file in [[NSFileManager defaultManager] contentsOfDirectoryAtURL:dir includingPropertiesForKeys:nil options:0 error:nil]) {
+        if ([file.pathExtension isEqualToString:@"tex"]) [self removeBuildCacheForTeXFileURL:file];
+    }
+    [[NSFileManager defaultManager] removeItemAtURL:dir error:nil];
+    self.scratchDirectoryURL = nil;
 }
 
 - (void)setupUI {
@@ -213,8 +291,16 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     [_splitView addSubview:_pdfContainerView];
 
     // 将工作区分栏包成 NSSplitViewItem 加入外层
+    // 外面再包一层容器，好把拖动条叠在分栏上方
+    NSView *contentContainer = [[NSView alloc] initWithFrame:_splitView.frame];
+    _splitView.frame = contentContainer.bounds;
+    [contentContainer addSubview:_splitView];
+    _dividerHandle = [[TMSplitDividerHandle alloc] initWithFrame:NSZeroRect];
+    _dividerHandle.splitView = _splitView;
+    [contentContainer addSubview:_dividerHandle positioned:NSWindowAbove relativeTo:_splitView];
+
     NSViewController *contentVC = [[NSViewController alloc] init];
-    contentVC.view = _splitView;
+    contentVC.view = contentContainer;
     NSSplitViewItem *contentItem = [NSSplitViewItem splitViewItemWithViewController:contentVC];
     contentItem.minimumThickness = 400.0;
     contentItem.holdingPriority = NSLayoutPriorityDefaultLow;
@@ -496,6 +582,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if (engine < TMTeXEngineLatexmk || engine > TMTeXEngineLuaLaTeX) engine = TMTeXEngineLatexmk;
     [TMCompiler sharedCompiler].engine = (TMTeXEngine)engine;
     [TMCompiler sharedCompiler].shellEscapeEnabled = p.shellEscapeEnabled;
+    [TMCompiler sharedCompiler].auxFilesBesideSource = p.auxFilesBesideSource;
     [TMCompiler sharedCompiler].extraArguments = [TMPreferences argumentsFromString:p.latexmkExtraArguments];
     [self.statusBar setSelectedEngine:(TMTeXEngine)engine];
 
@@ -531,6 +618,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     return splitView.bounds.size.width - 280.0;
 }
 
+/// 细分隔线只有 1pt，几乎抓不住；把可拖动区域向两侧各扩 4pt，光标靠近就会变成左右箭头。
+- (NSRect)splitView:(NSSplitView *)splitView effectiveRect:(NSRect)proposedEffectiveRect forDrawnRect:(NSRect)drawnRect ofDividerAtIndex:(NSInteger)dividerIndex {
+    return NSInsetRect(drawnRect, -4.0, 0);
+}
+
 - (void)splitView:(NSSplitView *)splitView resizeSubviewsWithOldSize:(NSSize)oldSize {
     NSRect bounds = splitView.bounds;
     CGFloat d = splitView.dividerThickness;
@@ -554,6 +646,15 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     } else {
         [splitView adjustSubviews];
     }
+}
+
+- (void)splitViewDidResizeSubviews:(NSNotification *)notification {
+    NSSplitView *splitView = notification.object;
+    if (splitView != self.splitView || splitView.subviews.count < 2) return;
+    CGFloat dividerMidX = NSMaxX(splitView.subviews[0].frame) + splitView.dividerThickness / 2.0;
+    self.dividerHandle.frame = NSMakeRect(floor(dividerMidX - kTMDividerHandleWidth / 2.0), 0,
+                                          kTMDividerHandleWidth, NSHeight(splitView.frame));
+    [self.window invalidateCursorRectsForView:self.dividerHandle];
 }
 
 #pragma mark - 文档管理与加载
@@ -959,6 +1060,13 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     return YES;
 }
 
+- (void)windowWillClose:(NSNotification *)notification {
+    if (!self.scratchDirectoryURL) return;
+    // 正在编译的是本窗口的暂存文档：先停掉，免得编译器往被删的目录里写
+    if (self.documentModel.isScratch && [self isCompiling]) [self cancelCompilation];
+    [self removeScratchDirectory];
+}
+
 #pragma mark - 编译动作与回调
 
 - (void)compileCurrentDocument {
@@ -966,8 +1074,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
     // 如果还没有指定文件路径，暂存到临时工作空间，省去弹窗干扰
     if (!self.documentModel.fileURL) {
-        NSString *tmpPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"TeXMini_Document.tex"];
-        NSURL *tmpURL = [NSURL fileURLWithPath:tmpPath];
+        NSURL *tmpURL = [self scratchFileURLNamed:@"TeXMini_Document.tex"];
         [self.documentModel saveScratchToURL:tmpURL error:nil];
     } else {
         [self.documentModel saveCurrentFileWithError:nil];
@@ -1710,11 +1817,15 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)pdfFitWidth {
-    self.pdfView.autoScales = YES;
+    self.pdfView.fitMode = TMPDFFitWidth;
+}
+
+- (void)pdfFitPage {
+    self.pdfView.fitMode = TMPDFFitPage;
 }
 
 - (void)pdfActualSize {
-    self.pdfView.autoScales = NO;
+    self.pdfView.fitMode = TMPDFFitManual;
     self.pdfView.scaleFactor = 1.0;
 }
 
@@ -1751,6 +1862,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
         @"ZoomOut",
+        @"FitPage",
         @"ToggleOutline"
     ];
 }
@@ -1812,6 +1924,13 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         item.image = [NSImage imageWithSystemSymbolName:@"plus.magnifyingglass" accessibilityDescription:@"Zoom In"];
         item.target = self;
         item.action = @selector(zoomIn);
+    } else if ([itemIdentifier isEqualToString:@"FitPage"]) {
+        item.label = @"整页";
+        item.toolTip = @"PDF 缩放到整页可见 (⌘9)";
+        item.image = [NSImage imageWithSystemSymbolName:@"arrow.up.left.and.down.right.and.arrow.up.right.and.down.left" accessibilityDescription:@"Fit Page"]
+                  ?: [NSImage imageWithSystemSymbolName:@"doc.viewfinder" accessibilityDescription:@"Fit Page"];
+        item.target = self;
+        item.action = @selector(pdfFitPage);
     } else if ([itemIdentifier isEqualToString:@"ZoomOut"]) {
         item.label = @"缩小";
         item.image = [NSImage imageWithSystemSymbolName:@"minus.magnifyingglass" accessibilityDescription:@"Zoom Out"];
@@ -1963,6 +2082,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)cleanAuxiliaryFilesForMainFile {
     NSURL *main = [self mainFileURLForCompile];
     if (!main) return;
+    // 缓存目录整个删掉；源文件旁的也清一遍（切换设置前或旧版本留下的）
+    [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:main] error:nil];
     [TMDocument cleanAuxiliaryFilesForTeXFileURL:main];
     if (![main isEqual:self.documentModel.fileURL]) [self.documentModel cleanAuxiliaryFiles];
     [self.outlineSidebarView.fileBrowserView reload];

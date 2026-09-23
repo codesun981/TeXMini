@@ -23,6 +23,8 @@ extern NSNotificationName const TMPreferencesDidChangeNotification;
 @property (nonatomic, assign) NSInteger defaultEngine;     // TMTeXEngine 的原始值，默认 0（latexmk 自动）
 @property (nonatomic, assign) BOOL autoCompileEnabled;     // 默认 NO
 @property (nonatomic, assign) BOOL shellEscapeEnabled;     // 默认 NO
+/// .aux/.log 等中间文件放在源文件旁（老习惯）。默认 NO：放进 ~/Library/Caches/TeXMini/build/。
+@property (nonatomic, assign) BOOL auxFilesBesideSource;
 @property (nonatomic, copy) NSString *latexmkExtraArguments; // 默认空；按空白拆分
 
 // PDF

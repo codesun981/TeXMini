@@ -11,6 +11,7 @@
 @property (nonatomic, strong) NSPopUpButton *enginePopup;
 @property (nonatomic, strong) NSButton *autoCompileCheck;
 @property (nonatomic, strong) NSButton *shellEscapeCheck;
+@property (nonatomic, strong) NSButton *auxBesideSourceCheck;
 @property (nonatomic, strong) NSTextField *extraArgsField;
 @property (nonatomic, assign) BOOL isLoading;
 @end
@@ -127,8 +128,10 @@
     _autoCompileCheck = [NSButton checkboxWithTitle:@"停止输入 1.5 秒后自动编译" target:self action:@selector(toggleChanged:)];
     _shellEscapeCheck = [NSButton checkboxWithTitle:@"允许 -shell-escape（minted、TikZ externalize 需要）" target:self action:@selector(toggleChanged:)];
 
+    _auxBesideSourceCheck = [NSButton checkboxWithTitle:@"中间文件（.aux、.log 等）放在源文件旁" target:self action:@selector(toggleChanged:)];
+
     _extraArgsField = [[NSTextField alloc] initWithFrame:NSZeroRect];
-    _extraArgsField.placeholderString = @"例如 -outdir=build -bibtex";
+    _extraArgsField.placeholderString = @"例如 -bibtex -f";
     _extraArgsField.target = self;
     _extraArgsField.action = @selector(extraArgsChanged:);
     _extraArgsField.delegate = (id)self;
@@ -142,6 +145,8 @@
         @[[self label:@"默认引擎："], _enginePopup],
         @[[NSGridCell emptyContentView], _autoCompileCheck],
         @[[NSGridCell emptyContentView], _shellEscapeCheck],
+        @[[NSGridCell emptyContentView], _auxBesideSourceCheck],
+        @[[NSGridCell emptyContentView], [self hint:@"默认放在 ~/Library/Caches/TeXMini，项目文件夹里只留 PDF 和 .synctex.gz。"]],
         @[[self label:@"附加参数："], _extraArgsField],
         @[[NSGridCell emptyContentView], [self hint:@"传给 latexmk（或无 latexmk 时直接传给引擎）。单个文件也可用 % !TEX program = xelatex 指定引擎。"]],
     ]];
@@ -191,6 +196,7 @@
     [_enginePopup selectItemAtIndex:(engine >= 0 && engine < _enginePopup.numberOfItems) ? engine : 0];
     _autoCompileCheck.state = p.autoCompileEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _shellEscapeCheck.state = p.shellEscapeEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+    _auxBesideSourceCheck.state = p.auxFilesBesideSource ? NSControlStateValueOn : NSControlStateValueOff;
     _extraArgsField.stringValue = p.latexmkExtraArguments;
     self.isLoading = NO;
 }
@@ -228,6 +234,7 @@
     else if (sender == _currentLineCheck) p.highlightsCurrentLine = on;
     else if (sender == _autoCompileCheck) p.autoCompileEnabled = on;
     else if (sender == _shellEscapeCheck) p.shellEscapeEnabled = on;
+    else if (sender == _auxBesideSourceCheck) p.auxFilesBesideSource = on;
 }
 
 - (void)engineChanged:(id)sender {

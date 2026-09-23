@@ -9,6 +9,7 @@ static NSString *const kCurrentLine = @"TMHighlightCurrentLine";
 static NSString *const kEngine = @"TMEngine";
 static NSString *const kAutoCompile = @"TMAutoCompile";
 static NSString *const kShellEscape = @"TMShellEscape";
+static NSString *const kAuxFilesBesideSource = @"TMAuxFilesBesideSource";
 static NSString *const kExtraArgs = @"TMLatexmkExtraArgs";
 static NSString *const kPDFInverted = @"TMPDFInverted";
 
@@ -30,6 +31,7 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
         kEngine: @0,
         kAutoCompile: @NO,
         kShellEscape: @NO,
+        kAuxFilesBesideSource: @NO,
         kExtraArgs: @"",
         kPDFInverted: @NO
     }];
@@ -79,6 +81,8 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
 
 - (BOOL)shellEscapeEnabled { return [self.defaults boolForKey:kShellEscape]; }
 - (void)setShellEscapeEnabled:(BOOL)v { [self.defaults setBool:v forKey:kShellEscape]; [self didChange]; }
+- (BOOL)auxFilesBesideSource { return [self.defaults boolForKey:kAuxFilesBesideSource]; }
+- (void)setAuxFilesBesideSource:(BOOL)v { [self.defaults setBool:v forKey:kAuxFilesBesideSource]; [self didChange]; }
 
 - (NSString *)latexmkExtraArguments { return [self.defaults stringForKey:kExtraArgs] ?: @""; }
 - (void)setLatexmkExtraArguments:(NSString *)v { [self.defaults setObject:v ?: @"" forKey:kExtraArgs]; [self didChange]; }

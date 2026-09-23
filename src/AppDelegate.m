@@ -163,6 +163,7 @@
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"放大" action:@selector(zoomInAction:) keyEquivalent:@"+"];
     [viewMenu addItemWithTitle:@"缩小" action:@selector(zoomOutAction:) keyEquivalent:@"-"];
+    [viewMenu addItemWithTitle:@"适合整页" action:@selector(pdfFitPageAction:) keyEquivalent:@"9"];
     [viewMenu addItemWithTitle:@"适合宽度" action:@selector(pdfFitWidthAction:) keyEquivalent:@"0"];
     NSMenuItem *actual = [viewMenu addItemWithTitle:@"实际大小" action:@selector(pdfActualSizeAction:) keyEquivalent:@"0"];
     actual.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
@@ -351,7 +352,7 @@
     if (action == @selector(exportPDFAction:) || action == @selector(revealPDFAction:)) {
         return self.mainWindowController.currentPDFURL != nil;
     }
-    if (action == @selector(printPDFAction:) || action == @selector(pdfFitWidthAction:) ||
+    if (action == @selector(printPDFAction:) || action == @selector(pdfFitWidthAction:) || action == @selector(pdfFitPageAction:) ||
         action == @selector(pdfActualSizeAction:) || action == @selector(pdfPreviousPageAction:) ||
         action == @selector(pdfNextPageAction:) || action == @selector(zoomInAction:) || action == @selector(zoomOutAction:)) {
         return [self.mainWindowController hasPDF];
@@ -415,6 +416,7 @@
 }
 
 - (void)pdfFitWidthAction:(id)sender { [self.mainWindowController pdfFitWidth]; }
+- (void)pdfFitPageAction:(id)sender { [self.mainWindowController pdfFitPage]; }
 - (void)pdfFindAction:(id)sender { [self.mainWindowController showPDFSearchBar]; }
 - (void)togglePDFInvertAction:(id)sender { [TMPreferences shared].pdfInverted = ![TMPreferences shared].pdfInverted; }
 - (void)pdfActualSizeAction:(id)sender { [self.mainWindowController pdfActualSize]; }

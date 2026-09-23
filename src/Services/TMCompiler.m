@@ -1,5 +1,6 @@
 #import "TMCompiler.h"
 #import "TMMagicComments.h"
+#import <CommonCrypto/CommonDigest.h>
 
 @interface TMCompiler ()
 @property (nonatomic, assign) BOOL isCompiling;
@@ -92,9 +93,24 @@
     return @"-pdf";
 }
 
++ (NSURL *)auxiliaryDirectoryForTeXFileURL:(NSURL *)texFileURL {
+    NSString *path = texFileURL.URLByStandardizingPath.path ?: @"";
+    const char *utf8 = path.UTF8String;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(utf8, (CC_LONG)strlen(utf8), digest);
+    NSMutableString *hash = [NSMutableString string];
+    for (int i = 0; i < 6; i++) [hash appendFormat:@"%02x", digest[i]];
+    NSString *name = [NSString stringWithFormat:@"%@-%@", texFileURL.URLByDeletingPathExtension.lastPathComponent, hash];
+
+    NSURL *caches = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory inDomains:NSUserDomainMask].firstObject
+                    ?: [NSURL fileURLWithPath:NSTemporaryDirectory()];
+    return [[[caches URLByAppendingPathComponent:@"TeXMini"] URLByAppendingPathComponent:@"build"] URLByAppendingPathComponent:name isDirectory:YES];
+}
+
 + (NSArray<NSString *> *)argumentsForEngineName:(NSString *)engineName
                                      useLatexmk:(BOOL)useLatexmk
-                                     workingDir:(NSString *)workingDir
+                                      outputDir:(NSString *)outputDir
+                                         auxDir:(nullable NSString *)auxDir
                                        fileName:(NSString *)fileName
                                     shellEscape:(BOOL)shellEscape
                                  extraArguments:(nullable NSArray<NSString *> *)extra {
@@ -107,7 +123,13 @@
         @"-file-line-error"
     ]];
     if (shellEscape) [args addObject:@"-shell-escape"];
-    [args addObject:[NSString stringWithFormat:@"-output-directory=%@", workingDir]];
+    BOOL separateAux = auxDir.length > 0 && ![auxDir isEqualToString:outputDir];
+    if (useLatexmk) {
+        [args addObject:[NSString stringWithFormat:@"-outdir=%@", outputDir]];
+        if (separateAux) [args addObject:[NSString stringWithFormat:@"-auxdir=%@", auxDir]];
+    } else {
+        [args addObject:[NSString stringWithFormat:@"-output-directory=%@", separateAux ? auxDir : outputDir]];
+    }
     for (NSString *a in extra) {
         if (a.length) [args addObject:a];
     }
@@ -145,6 +167,14 @@
     NSString *enginePath = [TMCompiler findExecutableNamed:engineName];
 
     NSString *workingDir = [texFileURL URLByDeletingLastPathComponent].path;
+    NSString *auxDir = nil;
+    if (!self.auxFilesBesideSource) {
+        NSURL *auxURL = [TMCompiler auxiliaryDirectoryForTeXFileURL:texFileURL];
+        // 建不出缓存目录就退回老行为，总比编译不了好
+        if ([[NSFileManager defaultManager] createDirectoryAtURL:auxURL withIntermediateDirectories:YES attributes:nil error:nil]) {
+            auxDir = auxURL.path;
+        }
+    }
     NSString *fileName = texFileURL.lastPathComponent;
     NSString *baseName = [texFileURL.URLByDeletingPathExtension lastPathComponent];
     NSURL *expectedPDFURL = [[texFileURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:[baseName stringByAppendingPathExtension:@"pdf"]];
@@ -153,7 +183,8 @@
     NSArray<NSString *> *args = execPath
         ? [TMCompiler argumentsForEngineName:engineName
                                   useLatexmk:(latexmkPath != nil)
-                                  workingDir:workingDir
+                                   outputDir:workingDir
+                                      auxDir:auxDir
                                     fileName:fileName
                                  shellEscape:self.shellEscapeEnabled
                               extraArguments:self.extraArguments]
@@ -246,6 +277,18 @@
                     [self.delegate compilerDidCancel];
                 }
                 return;
+            }
+
+            // 没有 latexmk 时引擎把 PDF 也写进了缓存目录，拷回源文件旁
+            if (!latexmkPath && auxDir) {
+                for (NSString *ext in @[@"pdf", @"synctex.gz"]) {
+                    NSString *name = [baseName stringByAppendingPathExtension:ext];
+                    NSURL *from = [NSURL fileURLWithPath:[auxDir stringByAppendingPathComponent:name]];
+                    NSURL *to = [NSURL fileURLWithPath:[workingDir stringByAppendingPathComponent:name]];
+                    if (![[NSFileManager defaultManager] fileExistsAtPath:from.path]) continue;
+                    [[NSFileManager defaultManager] removeItemAtURL:to error:nil];
+                    [[NSFileManager defaultManager] moveItemAtURL:from toURL:to error:nil];
+                }
             }
 
             NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:fullOutput];

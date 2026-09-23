@@ -10,6 +10,9 @@ clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     -Isrc/Models \
     -Isrc/Services \
     src/Models/TMDocument.m \
+    src/Models/TMOutlineItem.m \
+    src/Services/TMOutlineParser.m \
+    src/Services/TMLaTeXScanner.m \
     src/Services/TMEditActions.m \
     src/Services/TMMagicComments.m \
     src/Services/TMLogParser.m \

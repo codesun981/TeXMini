@@ -57,6 +57,14 @@ int main(void) {
         CHECK([[NSFileManager defaultManager] fileExistsAtPath:probe.pdfURL.path], "main.pdf should exist");
         CHECK([TMLogParser countOfKind:TMLogIssueWarning inIssues:probe.issues] >= 1, "undefined \\ref should yield a warning");
 
+        // 中间文件进缓存目录，源文件夹只留 PDF 与 synctex
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSURL *auxDir = [TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"main.tex"]]];
+        CHECK(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.aux"]], "main.aux must not be written next to the source");
+        CHECK(![fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.log"]], "main.log must not be written next to the source");
+        CHECK([fm fileExistsAtPath:[auxDir.path stringByAppendingPathComponent:@"main.aux"]], "main.aux should be in the cache directory");
+        CHECK([fm fileExistsAtPath:[dir stringByAppendingPathComponent:@"main.synctex.gz"]], "main.synctex.gz should sit next to main.pdf");
+
         // 2. 语法错误：应失败并给出行号
         NSString *broken = @"\\documentclass{article}\n\\begin{document}\nok\n\\undefinedmacro\n\\end{document}\n";
         [broken writeToFile:[dir stringByAppendingPathComponent:@"broken.tex"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
@@ -76,6 +84,9 @@ int main(void) {
         CHECK(waitFor(probe3, 120), "xelatex compile timed out");
         CHECK(probe3.success, "xelatex compile should succeed");
 
+        for (NSString *name in @[@"main.tex", @"broken.tex"]) {
+            [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]]] error:nil];
+        }
         [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
         printf("integration: %s (%d failures)\n", failures == 0 ? "OK" : "FAILED", failures);
     }

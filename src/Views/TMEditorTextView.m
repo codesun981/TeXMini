@@ -1,6 +1,7 @@
 #import "TMEditorTextView.h"
 #import "TMLaTeXHighlighter.h"
 #import "TMEditActions.h"
+#import "TMCompletionPopup.h"
 
 static NSString *const kTMIndentUnit = @"  ";
 
@@ -8,6 +9,9 @@ static NSString *const kTMIndentUnit = @"  ";
     /// 当前配对括号的两个 1 字符 range（临时属性），选区变化时清掉重画。
     NSRange _bracketRanges[2];
     BOOL _hasBracketHighlight;
+    TMCompletionPopup *_completionPopup;
+    /// 正在把候选写进正文，这期间的文字 / 选区变化不要再刷新浮窗
+    BOOL _acceptingCompletion;
 }
 
 - (void)setupEditor {
@@ -111,9 +115,10 @@ static unichar TMMatchingBracket(unichar c) {
     }
 }
 
-/// 从 index 处的括号出发寻找配对括号，跳过被反斜杠转义的括号。找不到返回 NSNotFound。
+/// 从 index 处的括号出发寻找配对括号，跳过被反斜杠转义的括号以及注释、代码块里的括号。找不到返回 NSNotFound。
 - (NSUInteger)matchingBracketIndexForIndex:(NSUInteger)index {
     NSString *text = self.string;
+    TMLaTeXScanResult *scan = [TMLaTeXHighlighter lastScanForTextStorage:self.textStorage];
     if (index >= text.length) return NSNotFound;
     unichar c = [text characterAtIndex:index];
     unichar partner = TMMatchingBracket(c);
@@ -126,16 +131,20 @@ static unichar TMMatchingBracket(unichar c) {
         for (NSUInteger i = index; i < end; i++) {
             unichar ch = [text characterAtIndex:i];
             if (i > 0 && [text characterAtIndex:i - 1] == '\\') continue;
+            if (ch != c && ch != partner) continue;
+            if ([scan isIgnorableAtIndex:i]) continue;
             if (ch == c) depth++;
-            else if (ch == partner && --depth == 0) return i;
+            else if (--depth == 0) return i;
         }
     } else {
         NSUInteger start = index > limit ? index - limit : 0;
         for (NSInteger i = (NSInteger)index; i >= (NSInteger)start; i--) {
             unichar ch = [text characterAtIndex:(NSUInteger)i];
             if (i > 0 && [text characterAtIndex:(NSUInteger)i - 1] == '\\') continue;
+            if (ch != c && ch != partner) continue;
+            if ([scan isIgnorableAtIndex:(NSUInteger)i]) continue;
             if (ch == c) depth++;
-            else if (ch == partner && --depth == 0) return (NSUInteger)i;
+            else if (--depth == 0) return (NSUInteger)i;
         }
     }
     return NSNotFound;
@@ -156,6 +165,8 @@ static unichar TMMatchingBracket(unichar c) {
     }
     if (candidate == NSNotFound) return;
     if (candidate > 0 && [text characterAtIndex:candidate - 1] == '\\') return;
+    // 光标处的括号本身在注释或代码块里：不配对
+    if ([[TMLaTeXHighlighter lastScanForTextStorage:self.textStorage] isIgnorableAtIndex:candidate]) return;
 
     NSUInteger match = [self matchingBracketIndexForIndex:candidate];
     if (match != NSNotFound) {
@@ -368,6 +379,7 @@ static unichar TMMatchingBracket(unichar c) {
     }
 
     [super insertText:string replacementRange:replacementRange];
+    [self scheduleCommandCompletionIfNeeded];
 }
 
 /// 若紧接着的下一行已经是 \end{env}，说明用户只是在环境内部换行，不再重复补全。
@@ -402,6 +414,7 @@ static unichar TMMatchingBracket(unichar c) {
 }
 
 - (void)keyDown:(NSEvent *)event {
+    if ([self handleCompletionKey:event]) return;
     if (event.keyCode == 48) { // Tab
         BOOL shift = (event.modifierFlags & NSEventModifierFlagShift) != 0;
         if (shift) {
@@ -435,33 +448,106 @@ static unichar TMMatchingBracket(unichar c) {
     }
 }
 
-- (NSRange)rangeForUserCompletion {
-    if (self.completionProvider) {
-        TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
-        if (ctx.kind != TMCompletionKindNone) return ctx.partialRange;
-    }
-    return [super rangeForUserCompletion];
+/// 输入 \ 加字母后停顿片刻，自动弹出命令候选；浮窗开着时每次编辑都会重新过滤。
+/// 连续快速打完 \section 的人不会被弹窗打断：每敲一个键都会取消上一次还没弹出的请求。
+- (void)scheduleCommandCompletionIfNeeded {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCompleteCommand) object:nil];
+    if (!self.completionProvider || self.completionPopup.isVisible || self.hasMarkedText || self.selectedRange.length > 0) return;
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
+    if (ctx.kind != TMCompletionKindCommand || ctx.partial.length < 2) return;
+    [self performSelector:@selector(autoCompleteCommand) withObject:nil afterDelay:0.12];
 }
 
-- (NSArray<NSString *> *)completionsForPartialWordRange:(NSRange)charRange indexOfSelectedItem:(NSInteger *)index {
-    if (self.completionProvider) {
-        TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:NSMaxRange(charRange)];
-        if (ctx.kind != TMCompletionKindNone) {
-            if (index) *index = 0;
-            return [self.completionProvider completionsForContext:ctx currentText:self.string];
+- (void)autoCompleteCommand {
+    // 延迟期间用户可能删掉或移走光标，弹之前再确认一次
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
+    if (ctx.kind != TMCompletionKindCommand || ctx.partial.length < 2 || self.window.firstResponder != self) return;
+    [self showCompletionPopup];
+}
+
+- (TMCompletionPopup *)completionPopup {
+    if (!_completionPopup) {
+        _completionPopup = [[TMCompletionPopup alloc] init];
+        __weak typeof(self) weakSelf = self;
+        _completionPopup.onAccept = ^(NSString *item) { [weakSelf acceptCompletion:item]; };
+    }
+    return _completionPopup;
+}
+
+/// ⌃Space / Esc / F5 以及 \cite{ 之后的自动弹出，都走自己的浮窗而不是系统弹窗
+- (void)complete:(id)sender {
+    [self showCompletionPopup];
+}
+
+/// 按光标处的上下文重新计算候选；没有上下文或没有候选就收起。
+- (void)showCompletionPopup {
+    if (!self.completionProvider || self.hasMarkedText || self.selectedRange.length > 0 || !self.window) {
+        [self.completionPopup hide];
+        return;
+    }
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
+    NSArray<NSString *> *items = ctx.kind == TMCompletionKindNone ? @[] : [self.completionProvider completionsForContext:ctx currentText:self.string];
+    if (items.count == 0) {
+        [self.completionPopup hide];
+        return;
+    }
+    NSRect anchor = [self firstRectForCharacterRange:ctx.partialRange actualRange:NULL];
+    [self.completionPopup showItems:items partial:ctx.partial anchorOnScreen:anchor parentWindow:self.window font:self.font];
+}
+
+- (void)didChangeText {
+    [super didChangeText];
+    // 浮窗开着时，打字 / 退格都让列表跟着过滤
+    if (!_acceptingCompletion && self.completionPopup.isVisible) [self showCompletionPopup];
+}
+
+- (BOOL)resignFirstResponder {
+    [_completionPopup hide];
+    return [super resignFirstResponder];
+}
+
+- (void)viewWillMoveToWindow:(NSWindow *)newWindow {
+    [_completionPopup hide];
+    [super viewWillMoveToWindow:newWindow];
+}
+
+/// 浮窗开着时拦下 ↑↓ 回车 Tab Esc；返回 NO 表示这个键照常交给编辑器
+- (BOOL)handleCompletionKey:(NSEvent *)event {
+    if (!_completionPopup.isVisible) return NO;
+    if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption)) return NO;
+    switch (event.keyCode) {
+        case 125: [self.completionPopup moveSelectionBy:1]; return YES;   // ↓
+        case 126: [self.completionPopup moveSelectionBy:-1]; return YES;  // ↑
+        case 36: case 76: case 48: {                                      // 回车 / 小键盘回车 / Tab
+            NSString *item = self.completionPopup.selectedItem;
+            if (!item) return NO;
+            [self acceptCompletion:item];
+            return YES;
         }
+        case 53: [self.completionPopup hide]; return YES;                  // Esc
+        default: return NO;
     }
-    return [super completionsForPartialWordRange:charRange indexOfSelectedItem:index];
 }
 
-- (void)insertCompletion:(NSString *)word forPartialWordRange:(NSRange)charRange movement:(NSInteger)movement isFinal:(BOOL)flag {
-    [super insertCompletion:word forPartialWordRange:charRange movement:movement isFinal:flag];
-    if (!flag || !self.completionProvider) return;
-    // 选定 \begin{env} 后，若下一行还没有 \end{env}，顺手补上，并把光标停在环境体内
-    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:charRange.location];
-    if (ctx.kind != TMCompletionKindEnvironment) return;
+/// 用选中的候选替换光标处正在输入的那段
+- (void)acceptCompletion:(NSString *)word {
+    [self.completionPopup hide];
+    TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
+    if (ctx.kind == TMCompletionKindNone) return;
+    NSRange range = ctx.partialRange;
+    if (![self shouldChangeTextInRange:range replacementString:word]) return;
+    _acceptingCompletion = YES;
+    [self.textStorage replaceCharactersInRange:range withString:word];
+    [self didChangeText];
+    [self setSelectedRange:NSMakeRange(range.location + word.length, 0)];
+    _acceptingCompletion = NO;
+    if (ctx.kind == TMCompletionKindEnvironment) [self closeEnvironmentAfterCompleting:word atLocation:range.location];
+}
+
+/// 选定 \begin{env} 后，若下一行还没有 \end{env}，顺手补上，并把光标停在环境体内
+- (void)closeEnvironmentAfterCompleting:(NSString *)word atLocation:(NSUInteger)location {
     NSString *full = self.string;
-    NSRange lineRange = [full lineRangeForRange:NSMakeRange(charRange.location, 0)];
+    NSRange lineRange = [full lineRangeForRange:NSMakeRange(location, 0)];
     NSString *line = [full substringWithRange:lineRange];
     if ([line containsString:@"\\end{"]) return;
     NSString *env = [TMEditActions environmentToCloseInLine:line];
@@ -495,6 +581,7 @@ static unichar TMMatchingBracket(unichar c) {
         }
         return;
     }
+    [_completionPopup hide];
     [super mouseDown:event];
     // 双击：保留系统的选词行为，同时把 PDF 同步到这一行
     if (event.clickCount == 2 && [self.editorDelegate respondsToSelector:@selector(editorTextViewDidRequestForwardSync)]) {
@@ -579,6 +666,13 @@ static unichar TMMatchingBracket(unichar c) {
 - (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges affinity:(NSSelectionAffinity)affinity stillSelecting:(BOOL)stillSelecting {
     NSRange previous = self.selectedRange;
     [super setSelectedRanges:selectedRanges affinity:affinity stillSelecting:stillSelecting];
+
+    // 光标左右移出了正在补全的词，就收起补全浮窗（放到下一轮，等文字和选区都更新完）
+    if (_completionPopup.isVisible && !_acceptingCompletion) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self->_completionPopup.isVisible) [self showCompletionPopup];
+        });
+    }
 
     if (selectedRanges.count > 0) {
         NSRange sel = selectedRanges.firstObject.rangeValue;

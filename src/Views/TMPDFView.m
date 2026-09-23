@@ -5,15 +5,13 @@
 @interface TMHighlightOverlayView : NSView
 @end
 
+/// 荧光笔样式：只铺一层黄色、不描边。图层用 multiply 混合，纸面变黄、字仍是黑的，
+/// 就像用记号笔划过；反色阅读时整块一起被取反，效果是深底上一条黄带。
 @implementation TMHighlightOverlayView
 - (void)drawRect:(NSRect)dirtyRect {
-    [super drawRect:dirtyRect];
-    NSBezierPath *path = [NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:3.0 yRadius:3.0];
-    [[[NSColor systemYellowColor] colorWithAlphaComponent:0.35] setFill];
-    [path fill];
-    [[[NSColor systemOrangeColor] colorWithAlphaComponent:0.8] setStroke];
-    path.lineWidth = 1.5;
-    [path stroke];
+    // alpha 留一点，即使混合模式失效也不会把字盖住
+    [[NSColor colorWithSRGBRed:1.0 green:0.90 blue:0.20 alpha:0.55] setFill];
+    [[NSBezierPath bezierPathWithRoundedRect:self.bounds xRadius:2.0 yRadius:2.0] fill];
 }
 @end
 
@@ -24,9 +22,63 @@
 - (void)setupPDFView {
     self.displayMode = kPDFDisplaySinglePageContinuous;
     self.displaysPageBreaks = YES;
-    self.autoScales = YES;
+    self.fitMode = TMPDFFitPage;
     self.backgroundColor = [NSColor windowBackgroundColor];
     self.wantsLayer = YES;
+}
+
+#pragma mark - 缩放方式
+
+- (void)setFitMode:(TMPDFFitMode)fitMode {
+    _fitMode = fitMode;
+    [self applyFitMode];
+}
+
+- (void)applyFitMode {
+    switch (self.fitMode) {
+        case TMPDFFitWidth:
+            self.autoScales = YES;
+            break;
+        case TMPDFFitPage: {
+            // 连续滚动模式下 PDFKit 的 autoScales 只适配宽度，整页要自己算
+            PDFPage *page = self.currentPage ?: [self.document pageAtIndex:0];
+            if (!page) return;
+            NSRect box = [page boundsForBox:self.displayBox];
+            NSSize pageSize = (page.rotation % 180 == 0) ? box.size : NSMakeSize(box.size.height, box.size.width);
+            if (pageSize.width <= 0 || pageSize.height <= 0) return;
+            NSEdgeInsets m = self.pageBreakMargins;
+            CGFloat w = NSWidth(self.bounds) - m.left - m.right - 8.0;
+            CGFloat h = NSHeight(self.bounds) - m.top - m.bottom - 8.0;
+            if (w <= 0 || h <= 0) return;
+            self.autoScales = NO;
+            self.scaleFactor = MIN(w / pageSize.width, h / pageSize.height);
+            [self goToPage:page];
+            break;
+        }
+        case TMPDFFitManual:
+            self.autoScales = NO;
+            break;
+    }
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    if (self.fitMode == TMPDFFitPage) [self applyFitMode];
+}
+
+- (void)zoomIn:(id)sender {
+    self.fitMode = TMPDFFitManual;
+    [super zoomIn:sender];
+}
+
+- (void)zoomOut:(id)sender {
+    self.fitMode = TMPDFFitManual;
+    [super zoomOut:sender];
+}
+
+- (void)magnifyWithEvent:(NSEvent *)event {
+    if (self.fitMode != TMPDFFitManual) self.fitMode = TMPDFFitManual;
+    [super magnifyWithEvent:event];
 }
 
 #pragma mark - 反色
@@ -83,6 +135,9 @@
 
     if (!preserve || !self.document) {
         self.document = newDoc;
+        [self applyFitMode];
+        // 文档刚换上时 PDFKit 还没排版完，下一轮再适配一次
+        dispatch_async(dispatch_get_main_queue(), ^{ [self applyFitMode]; });
         return;
     }
 
@@ -92,14 +147,19 @@
     NSScrollView *scrollView = self.enclosingScrollView;
     NSPoint scrollPoint = scrollView ? scrollView.contentView.bounds.origin : NSZeroPoint;
     CGFloat scale = self.scaleFactor;
-    BOOL wasAutoScaling = self.autoScales;
 
     self.document = newDoc;
 
     void (^restore)(void) = ^{
-        if (!wasAutoScaling) {
+        // 适配整页 / 宽度时按新文档重新算；手动缩放则保持原比例
+        if (self.fitMode == TMPDFFitManual) {
             self.autoScales = NO;
             self.scaleFactor = scale;
+        } else if (self.fitMode == TMPDFFitWidth) {
+            self.autoScales = YES;
+        } else {
+            self.autoScales = NO;
+            self.scaleFactor = scale; // 页面尺寸没变时就是原来的整页比例；变了等窗口调整时再算
         }
         if (pageIndex < (NSInteger)self.document.pageCount) {
             [self goToPage:[self.document pageAtIndex:pageIndex]];
@@ -148,18 +208,19 @@
     // 等这一轮布局结束再画高亮，convertRect:fromPage: 才是滚动后的坐标
     dispatch_async(dispatch_get_main_queue(), ^{
         [self removeOverlayIfAny]; // 同一轮里若有多次请求，只保留最后一个
-        NSRect viewRect = NSInsetRect([self convertRect:pageRect fromPage:page], -4, -2);
+        NSRect viewRect = NSInsetRect([self convertRect:pageRect fromPage:page], -3, -1);
         TMHighlightOverlayView *overlay = [[TMHighlightOverlayView alloc] initWithFrame:viewRect];
         overlay.wantsLayer = YES;
         overlay.alphaValue = 1.0;
         [self addSubview:overlay];
+        overlay.layer.compositingFilter = @"multiplyBlendMode"; // 黄底黑字，而不是盖一层半透明色
         self->_currentOverlay = overlay;
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             // 无论它是否还是“当前”高亮，到点都必须淡出移除，否则会残留
             if (overlay.superview == nil) return;
             [NSAnimationContext runAnimationGroup:^(NSAnimationContext * _Nonnull context) {
-                context.duration = 0.5;
+                context.duration = 0.6;
                 overlay.animator.alphaValue = 0.0;
             } completionHandler:^{
                 [overlay removeFromSuperview];
@@ -171,31 +232,26 @@
     });
 }
 
-/// 把页面上的矩形滚到视口正中（水平方向只在超出可见范围时才调整）。
+/// 把页面上的矩形滚到视口正中。
+///
+/// 不直接操作 PDFKit 内部的 clip view：页面比视口窄/短时 PDFKit 用负偏移把页面居中，
+/// 自己算并夹到 (0,0) 会把页面顶到角落。这里把目标矩形上下扩到接近一屏高，
+/// 交给 goToRect:onPage: 让整块可见，目标行自然落在正中。
 - (void)scrollToCenterPageRect:(NSRect)pageRect onPage:(PDFPage *)page {
-    NSView *docView = self.documentView;
-    NSScrollView *scrollView = docView.enclosingScrollView;
-    if (!docView || !scrollView) {
+    NSRect viewportOnPage = [self convertRect:self.bounds toPage:page];
+    CGFloat viewportHeight = NSHeight(viewportOnPage);
+    if (viewportHeight <= 0) {
         [self goToRect:pageRect onPage:page];
         return;
     }
 
-    NSRect inSelf = [self convertRect:pageRect fromPage:page];
-    NSRect inDoc = [docView convertRect:inSelf fromView:self];
-    NSClipView *clip = scrollView.contentView;
-    NSRect visible = clip.bounds;
-    NSRect docBounds = docView.bounds;
-
-    NSPoint origin = visible.origin;
-    origin.y = NSMidY(inDoc) - NSHeight(visible) / 2.0;
-    if (NSMinX(inDoc) < NSMinX(visible) || NSMaxX(inDoc) > NSMaxX(visible)) {
-        origin.x = NSMidX(inDoc) - NSWidth(visible) / 2.0;
-    }
-    origin.x = MAX(NSMinX(docBounds), MIN(origin.x, NSMaxX(docBounds) - NSWidth(visible)));
-    origin.y = MAX(NSMinY(docBounds), MIN(origin.y, NSMaxY(docBounds) - NSHeight(visible)));
-
-    [clip scrollToPoint:origin];
-    [scrollView reflectScrolledClipView:clip];
+    // 略小于一屏：矩形能整块放进视口，PDFKit 就不会退化成“顶部对齐”
+    CGFloat height = MAX(NSHeight(pageRect), viewportHeight * 0.96);
+    NSRect target = NSMakeRect(NSMinX(pageRect),
+                               NSMidY(pageRect) - height / 2.0,
+                               NSWidth(pageRect),
+                               height);
+    [self goToRect:target onPage:page];
 }
 
 /// 滚动或缩放后叠加层位置就不对了，直接撤掉，避免高亮飘在错误的地方。

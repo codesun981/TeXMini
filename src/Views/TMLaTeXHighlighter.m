@@ -55,6 +55,32 @@ static NSString *gBaseFontName = @"Menlo";
     return NSMakeRange(start, end - start);
 }
 
+/// 每个文本存储上一次扫描的块结构摘要：摘要变了（例如刚打出 \begin{verbatim} 的 \end），整篇重画
+static NSMapTable<NSTextStorage *, TMLaTeXScanResult *> *TMLastScans(void) {
+    static NSMapTable *table;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ table = [NSMapTable weakToStrongObjectsMapTable]; });
+    return table;
+}
+
++ (nullable TMLaTeXScanResult *)lastScanForTextStorage:(NSTextStorage *)textStorage {
+    return [TMLastScans() objectForKey:textStorage];
+}
+
+/// 公式内容用沉稳的绿色：橙黄色容易被当成警告 / 没识别出来。浅色、深色模式各一套
++ (NSColor *)mathColor {
+    static NSColor *color;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        color = [NSColor colorWithName:@"TMMathColor" dynamicProvider:^NSColor *(NSAppearance *appearance) {
+            BOOL dark = [appearance bestMatchFromAppearancesWithNames:@[NSAppearanceNameAqua, NSAppearanceNameDarkAqua]] == NSAppearanceNameDarkAqua;
+            return dark ? [NSColor colorWithSRGBRed:0.49 green:0.82 blue:0.60 alpha:1.0]
+                        : [NSColor colorWithSRGBRed:0.10 green:0.50 blue:0.28 alpha:1.0];
+        }];
+    });
+    return color;
+}
+
 + (void)highlightTextStorage:(NSTextStorage *)textStorage inRange:(NSRange)range {
     if (textStorage.length == 0) return;
 
@@ -64,69 +90,49 @@ static NSString *gBaseFontName = @"Menlo";
 
     @try {
         NSString *string = textStorage.string;
+        // 整篇扫描（线性、很快），只重画编辑附近的段落；结构变了才整篇重画
+        TMLaTeXScanResult *scan = [TMLaTeXScanner scanString:string];
+        TMLaTeXScanResult *previous = [TMLastScans() objectForKey:textStorage];
+        [TMLastScans() setObject:scan forKey:textStorage];
+
         NSRange scope = [self paragraphRangeForRange:range inString:string maxLines:200];
+        if (previous && ![previous.blockSignature isEqualToString:scan.blockSignature]) {
+            scope = NSMakeRange(0, string.length);
+        }
         if (scope.length == 0) return;
 
         NSFont *normalFont = [self baseFont];
-        NSFontManager *fm = [NSFontManager sharedFontManager];
-        NSFont *italicFont = [fm convertFont:normalFont toHaveTrait:NSFontItalicTrait] ?: normalFont;
+        NSFont *italicFont = [[NSFontManager sharedFontManager] convertFont:normalFont toHaveTrait:NSFontItalicTrait] ?: normalFont;
 
-        NSColor *defaultColor = [NSColor textColor];
-        NSColor *commandColor = [NSColor systemBlueColor];
-        NSColor *envColor = [NSColor systemPurpleColor];
-        NSColor *mathColor = [NSColor systemOrangeColor];
-        NSColor *verbColor = [NSColor systemTealColor];
-        NSColor *commentColor = [NSColor secondaryLabelColor];
-
-        static NSRegularExpression *commandRegex;
-        static NSRegularExpression *envRegex;
-        static NSRegularExpression *mathRegex;
-        static NSRegularExpression *displayMathRegex;
-        static NSRegularExpression *verbRegex;
-        static NSRegularExpression *commentRegex;
-        static dispatch_once_t onceToken;
-        dispatch_once(&onceToken, ^{
-            commandRegex = [NSRegularExpression regularExpressionWithPattern:@"\\\\[a-zA-Z@]+\\*?|\\\\[^a-zA-Z@\\s]" options:0 error:nil];
-            envRegex = [NSRegularExpression regularExpressionWithPattern:@"\\\\(begin|end)\\{[^}]+\\}" options:0 error:nil];
-            // 行内 $...$ 与 \(...\)
-            mathRegex = [NSRegularExpression regularExpressionWithPattern:@"(?<!\\\\)\\$(?:[^$\\\\]|\\\\.)+?\\$|\\\\\\((?:.|\\n)*?\\\\\\)" options:0 error:nil];
-            // $$...$$、\[...\]、以及常见的显示数学环境（可跨行）
-            displayMathRegex = [NSRegularExpression regularExpressionWithPattern:
-                @"(?<!\\\\)\\$\\$(?:.|\\n)*?\\$\\$"
-                @"|\\\\\\[(?:.|\\n)*?\\\\\\]"
-                @"|\\\\begin\\{(equation|align|alignat|gather|multline|eqnarray|displaymath|math|flalign)(\\*?)\\}(?:.|\\n)*?\\\\end\\{\\1\\2\\}"
-                options:0 error:nil];
-            verbRegex = [NSRegularExpression regularExpressionWithPattern:@"\\\\verb\\*?([^a-zA-Z\\s])(.*?)\\1" options:0 error:nil];
-            commentRegex = [NSRegularExpression regularExpressionWithPattern:@"(?<!\\\\)%.*$" options:NSRegularExpressionAnchorsMatchLines error:nil];
-        });
+        NSColor *colors[6];
+        colors[TMLaTeXRegionCommand] = [NSColor systemBlueColor];
+        colors[TMLaTeXRegionEnvironment] = [NSColor systemPurpleColor];
+        colors[TMLaTeXRegionMath] = [self mathColor];
+        colors[TMLaTeXRegionVerbatim] = [NSColor systemTealColor];
+        colors[TMLaTeXRegionComment] = [NSColor secondaryLabelColor];
+        colors[TMLaTeXRegionRaw] = [NSColor textColor];
 
         [textStorage beginEditing];
-
         [textStorage removeAttribute:NSForegroundColorAttributeName range:scope];
         [textStorage removeAttribute:NSFontAttributeName range:scope];
         [textStorage addAttribute:NSFontAttributeName value:normalFont range:scope];
-        [textStorage addAttribute:NSForegroundColorAttributeName value:defaultColor range:scope];
+        [textStorage addAttribute:NSForegroundColorAttributeName value:[NSColor textColor] range:scope];
 
-        void (^color)(NSRegularExpression *, NSColor *) = ^(NSRegularExpression *regex, NSColor *c) {
-            [regex enumerateMatchesInString:string options:0 range:scope usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
-                if (result) [textStorage addAttribute:NSForegroundColorAttributeName value:c range:result.range];
-            }];
-        };
-
-        // 顺序即优先级：后着色的覆盖先着色的
-        color(commandRegex, commandColor);
-        color(envRegex, envColor);
-        color(displayMathRegex, mathColor);
-        color(mathRegex, mathColor);
-        color(verbRegex, verbColor);
-
-        [commentRegex enumerateMatchesInString:string options:0 range:scope usingBlock:^(NSTextCheckingResult *result, NSMatchingFlags flags, BOOL *stop) {
-            if (result) {
-                [textStorage addAttribute:NSForegroundColorAttributeName value:commentColor range:result.range];
-                [textStorage addAttribute:NSFontAttributeName value:italicFont range:result.range];
+        // 后画的覆盖先画的：公式先铺底色，公式里的命令和 \begin{equation} 再盖上去；注释最后
+        static const TMLaTeXRegionKind order[] = {TMLaTeXRegionMath, TMLaTeXRegionCommand, TMLaTeXRegionEnvironment,
+                                                   TMLaTeXRegionVerbatim, TMLaTeXRegionComment};
+        const TMLaTeXRegion *regions = scan.regions;
+        NSUInteger count = scan.regionCount;
+        for (size_t pass = 0; pass < sizeof(order) / sizeof(order[0]); pass++) {
+            TMLaTeXRegionKind kind = order[pass];
+            for (NSUInteger k = 0; k < count; k++) {
+                if (regions[k].kind != kind) continue;
+                NSRange r = NSIntersectionRange(regions[k].range, scope);
+                if (r.length == 0) continue;
+                [textStorage addAttribute:NSForegroundColorAttributeName value:colors[kind] range:r];
+                if (kind == TMLaTeXRegionComment) [textStorage addAttribute:NSFontAttributeName value:italicFont range:r];
             }
-        }];
-
+        }
         [textStorage endEditing];
     } @finally {
         isHighlighting = NO;

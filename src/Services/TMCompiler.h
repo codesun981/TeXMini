@@ -25,6 +25,8 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 @property (nonatomic, assign) TMTeXEngine engine;
 /// 传 -shell-escape（minted / TikZ externalize 需要）。默认 NO。
 @property (nonatomic, assign) BOOL shellEscapeEnabled;
+/// YES：中间文件留在源文件旁（老行为）。NO（默认）：放进 auxiliaryDirectoryForTeXFileURL: 给出的缓存目录。
+@property (nonatomic, assign) BOOL auxFilesBesideSource;
 /// 追加到命令行末尾（文件名之前）的额外参数，例如 @[@"-outdir=build"]。
 @property (nonatomic, copy) NSArray<NSString *> *extraArguments;
 @property (nonatomic, readonly) BOOL isCompiling;
@@ -34,10 +36,17 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 + (nullable NSString *)findExecutableNamed:(NSString *)name;
 + (BOOL)isMacTeXInstalled;
 
+/// 某个主文件的中间文件目录：~/Library/Caches/TeXMini/build/<文件名>-<路径哈希>/。
+/// 按完整路径区分，同名的 main.tex 在不同项目里互不干扰。不负责创建目录。
++ (NSURL *)auxiliaryDirectoryForTeXFileURL:(NSURL *)texFileURL;
+
 /// 组装命令行参数（不含可执行文件本身）。useLatexmk=YES 时第一个参数是 -pdf / -xelatex / -lualatex。
+/// PDF 与 .synctex.gz 写到 outputDir；auxDir 非空且与 outputDir 不同时，其余中间文件写到 auxDir。
+/// 不用 latexmk 时引擎只认一个 -output-directory，这时全部写进 auxDir，由调用方再把 PDF 拷出来。
 + (NSArray<NSString *> *)argumentsForEngineName:(NSString *)engineName
                                      useLatexmk:(BOOL)useLatexmk
-                                     workingDir:(NSString *)workingDir
+                                      outputDir:(NSString *)outputDir
+                                         auxDir:(nullable NSString *)auxDir
                                        fileName:(NSString *)fileName
                                     shellEscape:(BOOL)shellEscape
                                  extraArguments:(nullable NSArray<NSString *> *)extra;
