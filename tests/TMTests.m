@@ -10,6 +10,8 @@
 #import "TMCompletionProvider.h"
 #import "TMPreferences.h"
 #import "TMCompiler.h"
+#import "TMFontSettings.h"
+#import "TMFontCatalog.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -486,6 +488,129 @@ TM_TEST(test_completion_scans_project_bib_and_labels) {
     ctx.kind = TMCompletionKindReference; ctx.partial = @"ch";
     TM_ASSERT_EQ_STR([[p completionsForContext:ctx currentText:@""] componentsJoinedByString:@","], @"ch:intro");
     [[NSFileManager defaultManager] removeItemAtURL:root error:nil];
+}
+
+#pragma mark - TMFontSettings
+
+static TMDocumentFontSettings *tm_fonts(NSString *latin, NSString *cjk, NSString *size) {
+    TMDocumentFontSettings *s = [[TMDocumentFontSettings alloc] init];
+    s.latinFont = latin;
+    s.cjkFont = cjk;
+    s.sizeOption = size;
+    return s;
+}
+
+TM_TEST(test_fonts_read_settings_ignores_comments) {
+    NSString *t = @"\\documentclass[UTF8,zihao=-4]{ctexart}\n% \\setmainfont{Arial}\n\\setmainfont[Ligatures=TeX]{Times New Roman}\n"
+                  @"\\setCJKmainfont{Songti SC}\n\\begin{document}\n\\setmainfont{Late}\n\\end{document}\n";
+    TMDocumentFontSettings *s = [TMFontSettings settingsInContent:t];
+    TM_ASSERT_EQ_STR(s.latinFont, @"Times New Roman");
+    TM_ASSERT_EQ_STR(s.cjkFont, @"Songti SC");
+    TM_ASSERT_EQ_STR(s.sizeOption, @"zihao=-4");
+    TM_ASSERT_TRUE([TMFontSettings isCTeXContent:t]);
+    TMDocumentFontSettings *none = [TMFontSettings settingsInContent:@"\\documentclass{article}\n\\begin{document}\n\\end{document}\n"];
+    TM_ASSERT_NIL(none.latinFont);
+    TM_ASSERT_NIL(none.sizeOption);
+}
+
+TM_TEST(test_fonts_apply_to_plain_article_adds_xecjk) {
+    NSString *t = @"\\documentclass{article}\n\\usepackage{amsmath}\n\\begin{document}\nHi\n\\end{document}\n";
+    NSString *r = [TMFontSettings contentByApplyingSettings:tm_fonts(@"Times New Roman", @"Kaiti SC", @"12pt") cjkFakeBold:NO toContent:t];
+    TM_ASSERT_EQ_STR(r, @"\\documentclass[12pt]{article}\n\\usepackage{amsmath}\n\\usepackage{xeCJK}\n"
+                        @"\\setmainfont{Times New Roman}\n\\setCJKmainfont{Kaiti SC}\n\\begin{document}\nHi\n\\end{document}\n");
+}
+
+TM_TEST(test_fonts_apply_latin_only_adds_fontspec) {
+    NSString *t = @"\\documentclass{article}\n\\begin{document}\n\\end{document}\n";
+    NSString *r = [TMFontSettings contentByApplyingSettings:tm_fonts(@"Georgia", nil, nil) cjkFakeBold:NO toContent:t];
+    TM_ASSERT_EQ_STR(r, @"\\documentclass{article}\n\\usepackage{fontspec}\n\\setmainfont{Georgia}\n\\begin{document}\n\\end{document}\n");
+}
+
+TM_TEST(test_fonts_apply_ctex_updates_in_place_and_keeps_options) {
+    NSString *t = @"\\documentclass[UTF8,12pt]{ctexart}\n\\setCJKmainfont[BoldFont=STHeiti]{STSong}\n\\setmainfont{Arial}\n\\begin{document}\n\\end{document}\n";
+    NSString *r = [TMFontSettings contentByApplyingSettings:tm_fonts(nil, @"Songti SC", @"zihao=-4") cjkFakeBold:YES toContent:t];
+    // 已有的 \setCJKmainfont 只改名、保留 BoldFont；英文字体设为默认 → 整行删掉；ctex 不需要补宏包
+    TM_ASSERT_EQ_STR(r, @"\\documentclass[UTF8,zihao=-4]{ctexart}\n\\setCJKmainfont[BoldFont=STHeiti]{Songti SC}\n\\begin{document}\n\\end{document}\n");
+}
+
+TM_TEST(test_fonts_apply_fake_bold_and_default_size) {
+    NSString *t = @"\\documentclass[11pt]{ctexart}\n\\begin{document}\n\\end{document}\n";
+    NSString *r = [TMFontSettings contentByApplyingSettings:tm_fonts(nil, @"STKaiti", nil) cjkFakeBold:YES toContent:t];
+    TM_ASSERT_EQ_STR(r, @"\\documentclass{ctexart}\n\\setCJKmainfont[AutoFakeBold]{STKaiti}\n\\begin{document}\n\\end{document}\n");
+    TM_ASSERT_NIL([TMFontSettings contentByApplyingSettings:tm_fonts(@"A", nil, nil) cjkFakeBold:NO toContent:@"\\section{x}\n"]);
+}
+
+TM_TEST(test_fonts_size_options_per_class) {
+    TM_ASSERT_EQ_INT([TMFontSettings sizeOptionsForDocumentClass:@"article"].count, 3);
+    TM_ASSERT_TRUE([[TMFontSettings sizeOptionsForDocumentClass:@"ctexart"] containsObject:@"zihao=-4"]);
+    TM_ASSERT_EQ_INT([TMFontSettings sizeOptionsForDocumentClass:@"thuthesis"].count, 0);
+    TM_ASSERT_EQ_STR([TMFontSettings displayNameForSizeOption:@"zihao=-4"], @"小四（12pt）");
+}
+
+TM_TEST(test_fonts_missing_names_from_log) {
+    NSString *log = @"./a.tex:4: Package fontspec Error: \n"
+                    @"(fontspec)                The font \"Microsoft YaHei\" cannot be found; this\n"
+                    @"(fontspec)                may be but usually is not a fontspec bug.\n"
+                    @"! Font \\x=\"PingFang SC:mapping=tex-text\" at 10.0pt not loadable: Metric (TFM) file or installed font not found.\n";
+    NSArray *names = [TMFontSettings missingFontNamesInLog:log];
+    TM_ASSERT_EQ_INT(names.count, 2);
+    TM_ASSERT_EQ_STR(names[0], @"Microsoft YaHei");
+    TM_ASSERT_EQ_STR(names[1], @"PingFang SC");
+    TM_ASSERT_NIL([TMFontSettings failingCTeXFontsetInLog:log]);
+    NSString *ctexLog = @"(/usr/local/texlive/2026/texmf-dist/tex/latex/ctex/fontset/ctex-fontset-windows.\n"
+                        @"def:101: Package fontspec Error: \n(fontspec)                The font \"SimSun\" cannot be found; this may be but\n";
+    TM_ASSERT_EQ_STR([TMFontSettings failingCTeXFontsetInLog:ctexLog], @"windows");
+    TM_ASSERT_EQ_STR([TMFontSettings missingFontNamesInLog:ctexLog].firstObject, @"SimSun");
+}
+
+TM_TEST(test_fonts_remove_ctex_fontset) {
+    TM_ASSERT_EQ_STR([TMFontSettings contentByRemovingCTeXFontset:@"windows" inContent:@"\\documentclass[fontset=windows]{ctexart}\n"],
+                     @"\\documentclass{ctexart}\n");
+    TM_ASSERT_EQ_STR([TMFontSettings contentByRemovingCTeXFontset:@"windows" inContent:@"\\documentclass[UTF8, fontset = windows,12pt]{ctexart}\n"],
+                     @"\\documentclass[UTF8,12pt]{ctexart}\n");
+    TM_ASSERT_EQ_STR([TMFontSettings contentByRemovingCTeXFontset:@"windows" inContent:@"\\documentclass{article}\n\\usepackage[fontset=windows]{ctex}\n"],
+                     @"\\documentclass{article}\n\\usepackage{ctex}\n");
+    TM_ASSERT_NIL([TMFontSettings contentByRemovingCTeXFontset:@"windows" inContent:@"\\documentclass{ctexart}\n"]);
+}
+
+TM_TEST(test_fonts_replace_only_on_font_lines) {
+    NSString *t = @"\\setCJKmainfont[BoldFont = SimHei, ItalicFont=KaiTi]{SimSun}\n"
+                  @"\\setCJKfamilyfont{zhkai}{kaiti_gb2312.ttf}\n"
+                  @"\\setCJKsansfont{Kaiti SC}\n"
+                  @"正文要求使用{宋体}和 SimSun。\n";
+    NSArray *found = [TMFontSettings knownReplaceableFontNamesInContent:t];
+    TM_ASSERT_EQ_STR([found componentsJoinedByString:@"|"], @"SimHei|KaiTi|SimSun|kaiti_gb2312.ttf");
+    NSUInteger n = 0;
+    NSString *r = [TMFontSettings contentByReplacingFonts:@{@"SimSun": @"Songti SC", @"SimHei": @"Heiti SC", @"KaiTi": @"Kaiti SC", @"kaiti_gb2312.ttf": @"Kaiti SC"}
+                                                inContent:t count:&n];
+    TM_ASSERT_EQ_INT(n, 4);
+    TM_ASSERT_EQ_STR(r, @"\\setCJKmainfont[BoldFont = Heiti SC, ItalicFont=Kaiti SC]{Songti SC}\n"
+                        @"\\setCJKfamilyfont{zhkai}{Kaiti SC}\n"
+                        @"\\setCJKsansfont{Kaiti SC}\n"
+                        @"正文要求使用{宋体}和 SimSun。\n");
+    TM_ASSERT_EQ_STR([TMFontSettings replacementCandidatesForFont:@"SIMSUN.TTC"].firstObject, @"Songti SC");
+    TM_ASSERT_EQ_INT([TMFontSettings replacementCandidatesForFont:@"Songti SC"].count, 0);
+}
+
+TM_TEST(test_compiler_font_commands_pick_xelatex) {
+    TMCompiler *c = [[TMCompiler alloc] init];
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{article}\n\\usepackage{unicode-math}\n\\setmainfont{Georgia}\n"], @"xelatex");
+}
+
+#pragma mark - TMFontCatalog
+
+TM_TEST(test_font_catalog_lists_songti_and_hides_pingfang) {
+    NSArray<TMFontFamily *> *families = [TMFontCatalog enumerateSystemFamilies];
+    TMFontFamily *songti = nil;
+    BOOL pingfang = NO;
+    for (TMFontFamily *f in families) {
+        if ([f.familyName isEqualToString:@"Songti SC"]) songti = f;
+        if ([f.familyName isEqualToString:@"PingFang SC"]) pingfang = YES;
+    }
+    TM_ASSERT_TRUE(songti != nil);
+    TM_ASSERT_TRUE(songti.supportsChinese);
+    TM_ASSERT_TRUE(songti.hasBold);
+    TM_ASSERT_TRUE(!pingfang);
 }
 
 #pragma mark - Runner

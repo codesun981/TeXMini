@@ -57,6 +57,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)increaseEditorFontSize;
 - (void)decreaseEditorFontSize;
 - (void)resetEditorFontSize;
+/// 编辑 › 文档字体…：选择英文 / 中文字体与字号，写入主文件导言区。
+- (void)showDocumentFontsSheet;
 /// 从 TMPreferences 重新应用全部偏好（字体、换行、引擎、编译参数、自动编译）。
 - (void)applyPreferences;
 

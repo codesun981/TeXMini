@@ -550,6 +550,30 @@ static unichar TMMatchingBracket(unichar c) {
     [self scrollRangeToVisible:NSMakeRange(cursor, 0)];
 }
 
+- (void)replaceTextWith:(NSString *)newText actionName:(NSString *)actionName {
+    NSString *old = self.string;
+    if ([old isEqualToString:newText]) return;
+    // 公共前缀 / 后缀之外的中间段才是改动
+    NSUInteger prefix = 0, oldLen = old.length, newLen = newText.length;
+    while (prefix < oldLen && prefix < newLen && [old characterAtIndex:prefix] == [newText characterAtIndex:prefix]) prefix++;
+    NSUInteger suffix = 0;
+    while (suffix < oldLen - prefix && suffix < newLen - prefix &&
+           [old characterAtIndex:oldLen - 1 - suffix] == [newText characterAtIndex:newLen - 1 - suffix]) suffix++;
+    NSRange changed = NSMakeRange(prefix, oldLen - prefix - suffix);
+    NSString *replacement = [newText substringWithRange:NSMakeRange(prefix, newLen - prefix - suffix)];
+
+    NSRange sel = self.selectedRange;
+    if (![self shouldChangeTextInRange:changed replacementString:replacement]) return;
+    [self.textStorage replaceCharactersInRange:changed withString:replacement];
+    [self didChangeText];
+    [self.undoManager setActionName:actionName];
+    // 光标在改动段之后就跟着平移，在之前不动，落在改动段里就放到改动末尾
+    NSUInteger cursor = sel.location;
+    if (cursor >= NSMaxRange(changed)) cursor = cursor - changed.length + replacement.length;
+    else if (cursor > changed.location) cursor = changed.location + replacement.length;
+    [self setSelectedRange:NSMakeRange(MIN(cursor, newLen), 0)];
+}
+
 #pragma mark - 光标行列位置更新
 
 - (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges affinity:(NSSelectionAffinity)affinity stillSelecting:(BOOL)stillSelecting {

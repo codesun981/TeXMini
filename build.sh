@@ -16,6 +16,7 @@ clang -fobjc-arc -O2 \
     -framework Cocoa \
     -framework PDFKit \
     -framework QuartzCore \
+    -framework CoreText \
     -framework CoreImage \
     -framework UniformTypeIdentifiers \
     -lz \
@@ -40,8 +41,11 @@ clang -fobjc-arc -O2 \
     src/Services/TMCompletionProvider.m \
     src/Services/TMFileWatcher.m \
     src/Services/TMPreferences.m \
+    src/Services/TMFontSettings.m \
+    src/Services/TMFontCatalog.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
+    src/Views/TMDocumentFontView.m \
     src/Views/TMEditorTextView.m \
     src/Views/TMPDFView.m \
     src/Views/TMStatusBarView.m \

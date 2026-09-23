@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)rehighlightAll;
 /// 可撤销地在 location 插入文本，光标停在 location + cursorOffset。
 - (void)insertSnippet:(NSString *)snippet atLocation:(NSUInteger)location cursorOffset:(NSUInteger)cursorOffset;
+/// 用 newText 整体替换内容，但只改动真正不同的那一段：一步可撤销，光标尽量留在原处。
+- (void)replaceTextWith:(NSString *)newText actionName:(NSString *)actionName;
 
 /// 编辑器字号（9–30），设置后立即重排并重新着色。
 @property (nonatomic, assign) CGFloat editorFontSize;

@@ -6,6 +6,7 @@ mkdir -p build
 
 clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     -framework Foundation \
+    -framework CoreText \
     -Isrc/Models \
     -Isrc/Services \
     src/Models/TMDocument.m \
@@ -17,6 +18,8 @@ clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     src/Services/TMCompletionProvider.m \
     src/Services/TMPreferences.m \
     src/Services/TMCompiler.m \
+    src/Services/TMFontSettings.m \
+    src/Services/TMFontCatalog.m \
     tests/TMTests.m \
     -o build/tmtests
 

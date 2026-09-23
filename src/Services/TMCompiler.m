@@ -80,8 +80,10 @@
     if ([program isEqualToString:@"xelatex"] || [program isEqualToString:@"pdflatex"] || [program isEqualToString:@"lualatex"]) {
         return program;
     }
-    BOOL looksChinese = [content containsString:@"ctex"] || [content containsString:@"xeCJK"] || [content containsString:@"fontspec"];
-    return looksChinese ? @"xelatex" : @"pdflatex";
+    // ctex / xeCJK / fontspec，或直接用了 fontspec 的字体命令（可能经 unicode-math 等间接加载），都需要 XeLaTeX
+    BOOL needsXeTeX = [content containsString:@"ctex"] || [content containsString:@"xeCJK"] || [content containsString:@"fontspec"] ||
+                      [content containsString:@"\\setmainfont"] || [content containsString:@"\\setCJKmainfont"];
+    return needsXeTeX ? @"xelatex" : @"pdflatex";
 }
 
 + (NSString *)latexmkFlagForEngineName:(NSString *)name {

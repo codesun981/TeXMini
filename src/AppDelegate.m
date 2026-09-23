@@ -126,6 +126,8 @@
     [editMenu addItemWithTitle:@"增加缩进" action:@selector(indentSelection:) keyEquivalent:@"]"];
     [editMenu addItemWithTitle:@"减少缩进" action:@selector(outdentSelection:) keyEquivalent:@"["];
     [editMenu addItem:[NSMenuItem separatorItem]];
+    [editMenu addItemWithTitle:@"文档字体…" action:@selector(documentFontsAction:) keyEquivalent:@"t"];
+    [editMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *spellingItem = [[NSMenuItem alloc] initWithTitle:@"拼写和语法" action:nil keyEquivalent:@""];
     NSMenu *spellingMenu = [[NSMenu alloc] initWithTitle:@"拼写和语法"];
     [spellingMenu addItemWithTitle:@"显示拼写和语法" action:@selector(showGuessPanel:) keyEquivalent:@":"];
@@ -265,6 +267,10 @@
 
 - (void)gotoLineAction:(id)sender {
     [self.mainWindowController promptGotoLine];
+}
+
+- (void)documentFontsAction:(id)sender {
+    [self.mainWindowController showDocumentFontsSheet];
 }
 
 - (void)newDocumentAction:(id)sender {
