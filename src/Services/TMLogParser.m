@@ -1,6 +1,14 @@
 #import "TMLogParser.h"
 
 @implementation TMLogIssue
+- (NSString *)kindLabel {
+    switch (self.kind) {
+        case TMLogIssueError: return @"错误";
+        case TMLogIssueWarning: return @"警告";
+        case TMLogIssueBadBox: return @"坏盒子";
+    }
+    return @"";
+}
 @end
 
 @implementation TMLogParser
@@ -18,7 +26,7 @@
         inputLineRegex = [NSRegularExpression regularExpressionWithPattern:@"on input line (\\d+)" options:0 error:nil];
         atLinesRegex = [NSRegularExpression regularExpressionWithPattern:@"at lines? (\\d+)" options:0 error:nil];
         tomlineRegex = [NSRegularExpression regularExpressionWithPattern:@"^l\\.(\\d+)" options:0 error:nil];
-        fileLineRegex = [NSRegularExpression regularExpressionWithPattern:@"^(?:\\./)?[^:\\n]+\\.(?:tex|sty|cls|ltx|def):(\\d+):\\s*(.+)$" options:0 error:nil];
+        fileLineRegex = [NSRegularExpression regularExpressionWithPattern:@"^((?:\\./)?[^:\\n]+\\.(?:tex|sty|cls|ltx|def)):(\\d+):\\s*(.+)$" options:0 error:nil];
     });
 
     NSInteger (^lineFrom)(NSRegularExpression *, NSString *) = ^NSInteger(NSRegularExpression *re, NSString *s) {
@@ -51,8 +59,9 @@
         if (fl) {
             TMLogIssue *issue = [[TMLogIssue alloc] init];
             issue.kind = TMLogIssueError;
-            issue.line = [[l substringWithRange:[fl rangeAtIndex:1]] integerValue];
-            issue.message = [l substringWithRange:[fl rangeAtIndex:2]];
+            issue.filePath = [l substringWithRange:[fl rangeAtIndex:1]];
+            issue.line = [[l substringWithRange:[fl rangeAtIndex:2]] integerValue];
+            issue.message = [l substringWithRange:[fl rangeAtIndex:3]];
             [issues addObject:issue];
             continue;
         }

@@ -17,7 +17,7 @@ static NSString *const kTMDefaultsEngine = @"TMEngine";
 static NSString *const kTMDefaultsFontSize = @"TMEditorFontSize";
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
-@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate>
+@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate>
 
 // 外层：系统 NSSplitViewController 负责侧边栏折叠、分割线隐藏、宽度记忆
 @property (nonatomic, strong) NSSplitViewController *mainSplitViewController;
@@ -27,6 +27,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 @property (nonatomic, strong) NSSplitView *splitView;
 @property (nonatomic, strong) TMEditorTextView *editorTextView;
 @property (nonatomic, strong) NSScrollView *editorScrollView;
+@property (nonatomic, strong) TMLineNumberRulerView *lineNumberRuler;
+/// 最近一次编译解析出的问题，切换文件时据此重画行号槽标记。
+@property (nonatomic, copy) NSArray<TMLogIssue *> *lastIssues;
 @property (nonatomic, strong) NSView *pdfContainerView;
 @property (nonatomic, strong) TMPDFView *pdfView;
 @property (nonatomic, strong) NSView *pdfPlaceholderView;
@@ -166,6 +169,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
     TMLineNumberRulerView *ruler = [[TMLineNumberRulerView alloc] initWithScrollView:_editorScrollView];
     _editorScrollView.verticalRulerView = ruler;
+    _lineNumberRuler = ruler;
 
     [_splitView addSubview:_editorScrollView];
 
@@ -203,6 +207,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
     // 2. 抽屉式日志视图
     _logDrawer = [[TMLogDrawerView alloc] init];
+    _logDrawer.delegate = self;
     _logDrawer.translatesAutoresizingMaskIntoConstraints = NO;
     [contentView addSubview:_logDrawer];
 
@@ -359,6 +364,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         [self refreshWindowTitle];
         [self syncProjectRootWithDocument];
         [self startWatchingCurrentFile];
+        [self refreshIssueMarks];
         // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
         [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
     }
@@ -717,7 +723,59 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     }
 
     [self.logDrawer clearLog];
+    self.lastIssues = @[];
+    [self refreshIssueMarks];
     [[TMCompiler sharedCompiler] compileFileAtURL:[self mainFileURLForCompile]];
+}
+
+#pragma mark - 问题列表与行号槽标记
+
+/// 日志里的文件名（相对主文件目录，如 "./chapters/ch1.tex"）是否指向当前编辑的文件。
+/// 文件名为空（TeX 原生 "! " 错误没有文件信息）时，按“属于主文件”处理。
+- (BOOL)issueBelongsToCurrentDocument:(TMLogIssue *)issue {
+    NSURL *current = self.documentModel.fileURL;
+    if (!current) return NO;
+    NSURL *target = [self fileURLForIssue:issue];
+    if (!target) return YES;
+    return [target.URLByStandardizingPath.URLByResolvingSymlinksInPath.path
+            isEqualToString:current.URLByStandardizingPath.URLByResolvingSymlinksInPath.path];
+}
+
+- (nullable NSURL *)fileURLForIssue:(TMLogIssue *)issue {
+    if (issue.filePath.length == 0) {
+        return [self mainFileURLForCompile];
+    }
+    NSURL *main = [self mainFileURLForCompile];
+    NSURL *base = main ? main.URLByDeletingLastPathComponent : self.projectRootURL;
+    if (!base) return nil;
+    return [NSURL fileURLWithPath:issue.filePath relativeToURL:base].URLByStandardizingPath;
+}
+
+- (void)refreshIssueMarks {
+    NSMutableDictionary<NSNumber *, NSNumber *> *marks = [NSMutableDictionary dictionary];
+    for (TMLogIssue *issue in self.lastIssues) {
+        if (issue.line <= 0) continue;
+        if (![self issueBelongsToCurrentDocument:issue]) continue;
+        NSNumber *existing = marks[@(issue.line)];
+        // 同一行多条时保留最严重的（错误 < 警告 < 坏盒子）
+        if (!existing || issue.kind < existing.integerValue) marks[@(issue.line)] = @(issue.kind);
+    }
+    [self.lineNumberRuler setIssueMarks:marks];
+}
+
+- (void)logDrawerView:(TMLogDrawerView *)drawer didSelectIssue:(TMLogIssue *)issue {
+    if (issue.line <= 0) return;
+    NSURL *target = [self fileURLForIssue:issue];
+    if (target && ![self issueBelongsToCurrentDocument:issue]) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:target.path] || ![TMProject isEditableFileURL:target]) {
+            [self.statusBar showInfoMessage:[NSString stringWithFormat:@"该问题来自 %@，文件不可打开", target.lastPathComponent]];
+            return;
+        }
+        [self openDocumentAtURL:target];
+        if (![self issueBelongsToCurrentDocument:issue]) return; // 用户取消了切换
+    }
+    [self.editorTextView jumpToLine:issue.line column:1];
+    [self.window makeFirstResponder:self.editorTextView];
 }
 
 /// 我们自己写完磁盘后调用：记住新的修改时间（避免误报外部修改），并让补全重新扫描。
@@ -797,6 +855,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     NSUInteger warnings = [TMLogParser countOfKind:TMLogIssueWarning inIssues:issues];
     NSUInteger badBoxes = [TMLogParser countOfKind:TMLogIssueBadBox inIssues:issues];
     [self.statusBar showSuccessStateWithDuration:durationSeconds warnings:warnings badBoxes:badBoxes];
+    self.lastIssues = issues;
+    [self.logDrawer setIssues:issues];
+    [self refreshIssueMarks];
     self.currentPDFURL = pdfURL;
     self.pdfPlaceholderView.hidden = YES;
     [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
@@ -806,6 +867,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 - (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log issues:(NSArray<TMLogIssue *> *)issues {
     [self.statusBar showErrorStateWithMessage:summary line:lineNumber];
+    self.lastIssues = issues;
+    [self.logDrawer setIssues:issues];
+    [self refreshIssueMarks];
     if (!self.logDrawer.isExpanded) {
         [self.logDrawer toggleAnimated];
     }

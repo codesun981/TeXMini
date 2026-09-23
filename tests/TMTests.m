@@ -179,6 +179,16 @@ TM_TEST(test_log_parser_file_line_error_format) {
     TM_ASSERT_EQ_INT(issues[0].kind, TMLogIssueError);
     TM_ASSERT_EQ_INT(issues[0].line, 15);
     TM_ASSERT_EQ_STR(issues[0].message, @"Undefined control sequence.");
+    TM_ASSERT_EQ_STR(issues[0].filePath, @"./sample/test.tex");
+    TM_ASSERT_EQ_INT(issues[1].line, 20);
+}
+
+TM_TEST(test_log_parser_native_error_has_no_file_path_and_kind_labels) {
+    NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:@"! Missing $ inserted.\nl.5 a_b\nOverfull \\hbox (1pt too wide) in paragraph at lines 20--21\n"];
+    TM_ASSERT_EQ_INT(issues.count, 2);
+    TM_ASSERT_NIL(issues[0].filePath);
+    TM_ASSERT_EQ_STR(issues[0].kindLabel, @"错误");
+    TM_ASSERT_EQ_STR(issues[1].kindLabel, @"坏盒子");
     TM_ASSERT_EQ_INT(issues[1].line, 20);
 }
 

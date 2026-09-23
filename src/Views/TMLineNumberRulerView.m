@@ -2,6 +2,27 @@
 
 @implementation TMLineNumberRulerView {
     NSDictionary *_attributes;
+    NSDictionary<NSNumber *, NSNumber *> *_issueMarks;
+}
+
+- (void)setIssueMarks:(NSDictionary<NSNumber *, NSNumber *> *)marks {
+    _issueMarks = marks.count ? [marks copy] : nil;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)drawIssueMarkForLine:(NSUInteger)lineNumber inLineRect:(NSRect)lineRect atY:(CGFloat)y {
+    NSNumber *kind = _issueMarks[@(lineNumber)];
+    if (!kind) return;
+    NSColor *color;
+    switch (kind.integerValue) {
+        case 0: color = [NSColor systemRedColor]; break;
+        case 1: color = [NSColor systemOrangeColor]; break;
+        default: color = [NSColor systemYellowColor]; break;
+    }
+    CGFloat d = 6.0;
+    NSRect dot = NSMakeRect(5.0, y + (lineRect.size.height - d) / 2.0, d, d);
+    [color setFill];
+    [[NSBezierPath bezierPathWithOvalInRect:dot] fill];
 }
 
 - (instancetype)initWithScrollView:(NSScrollView *)scrollView {
@@ -123,6 +144,7 @@
                                       labelSize.height);
 
         [label drawInRect:labelRect withAttributes:_attributes];
+        if (_issueMarks) [self drawIssueMarkForLine:lineNumber inLineRect:lineRect atY:y];
 
         NSRange lineRange = [text lineRangeForRange:NSMakeRange(charIndex, 0)];
         if (lineRange.length == 0) {
