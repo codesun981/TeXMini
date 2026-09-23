@@ -1,0 +1,11 @@
+% !TEX program = xelatex
+\documentclass{article}
+\usepackage{fontspec}
+\setmainfont{Times New Roman}
+\begin{document}
+Line 1 says \verb|% !TEX program = xelatex|. The status bar must show
+\texttt{latexmk · xelatex} while the engine popup stays on "自动 (latexmk)".
+
+fontspec fails under pdflatex, so if the magic comment is ignored this file
+errors out with "Fatal Package fontspec Error".
+\end{document}

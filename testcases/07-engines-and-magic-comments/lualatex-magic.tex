@@ -1,0 +1,13 @@
+%!TEX program=lualatex
+\documentclass{article}
+\usepackage{fontspec}
+\usepackage{luacode}
+\begin{document}
+Magic comment without spaces (\verb|%!TEX program=lualatex|) must still parse.
+Status bar: \texttt{latexmk · lualatex}.
+
+Lua proves the engine: \directlua{tex.print("Lua says 2+2=" .. 2+2)}
+
+Now switch the status bar popup to "lualatex" explicitly and rebuild; then to
+"pdflatex" and rebuild: pdflatex must fail on \verb|\directlua|. Switch back to 自动.
+\end{document}

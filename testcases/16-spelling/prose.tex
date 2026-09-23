@@ -1,0 +1,17 @@
+\documentclass{article}
+\begin{document}
+\section{Spelling}
+This paragraf contains severall mispelled wrods on purpose, and a correctly
+spelled sentence afterwards. LaTeX commands like \textbf{boldface} and
+\emph{emphasis} must not be flagged as misspellings themselves, but the words
+inside their braces should be checked: \textbf{definately} is wrong.
+
+Math must be ignored: $x_{\mathrm{max}} + \alpha_{ij}$ contains no words.
+Comments: % this coment is mispeled but do you want it checked?
+
+Citation keys and labels are not words: \cite{knuth1984} \ref{sec:intro} \label{sec:spelling}
+File paths are not words: \verb|\input{chapters/introducton}| \verb|\includegraphics{figs/plott.png}|
+
+\section{Grammar}
+Their going to the park, its a nice day. Me and him goes there alot.
+\end{document}

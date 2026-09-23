@@ -1,0 +1,59 @@
+\documentclass{article}
+\usepackage{amsmath}
+\begin{document}
+% ===== 编辑器行为演练场：在指定位置按说明操作，不需要编译 =====
+
+\section{Auto-pairing}
+% 在下一行行尾依次输入 { [ ( $ ：每个都应自动补闭合并把光标放中间；再输入对应闭合符应“跳过”而不是重复。
+Type here:
+% 在下一行行尾输入 \{ ：反斜杠后的 { 不应配对。
+Escaped:
+% 选中下面的单词 WORD 再输入 { ：应变成 {WORD} 且 WORD 保持选中。
+Wrap WORD with braces.
+% 在 {} 中间按 Delete：应一次删掉一对。
+Delete pair: {}
+
+\section{Environments}
+% 在下一行行尾输入 \begin{itemize} 然后回车：应自动补 \end{itemize}，光标在中间缩进两格。
+Type begin here:
+% 下面已经有 \end{enumerate}：在 \begin 行末回车不应重复补一个 \end。
+\begin{enumerate}
+\end{enumerate}
+% 输入 \begin{ 后应自动弹出环境候选；选 align 后同样补 \end{align}。
+Completion:
+
+\section{Indent and comment}
+% 选中下面三行按 Tab / Shift-Tab（或 Cmd-] Cmd-[），再按 Cmd-/ 两次。
+line one
+  line two (already indented)
+line three
+% 单行无选区按 Tab 插入两个空格；Shift-Tab 反缩进。
+    four-space line
+
+\section{Enter keeps indentation}
+    % 在这一行末尾回车：新行应保留 4 个空格缩进。
+
+\section{Completion}
+% 在下面每个 { 里按 Ctrl-Space。
+\ref{}  \cite{}  \eqref{}  \pageref{}  \autoref{}
+% 输入 \sec 后 Ctrl-Space：应列出 \section \subsection 等；\vect 是本文件定义的命令，也应在列。
+\newcommand{\vect}[1]{\mathbf{#1}}
+Command:
+\label{sec:first}\label{fig:second}\label{tab:third}
+
+\section{Bracket matching}
+% 把光标放在每个括号旁边，看配对括号是否高亮；转义的 \{ 不应匹配。
+\frac{a}{b} [x] (y) \{ not paired \} \left( \frac{1}{2} \right) {outer {inner} outer}
+% 不平衡的括号：{ 没有闭合 ------ 光标放这里不应卡顿（20000 字符扫描上限）。
+
+\section{Go to line and sync}
+% Cmd-L 输入 40；再输入 9999（超出范围应跳到末尾或不动，不崩溃）。
+% 在任意行 Cmd-J 而 PDF 尚未编译：状态栏应提示“还没有 PDF”。
+
+\section{Find and replace}
+% Cmd-F 查找 needle：3 处；Opt-Cmd-F 全部替换成 pin；Cmd-Z 撤销。
+needle needle needle
+% Cmd-E 用所选内容查找：选中 haystack 再 Cmd-E Cmd-G。
+haystack
+
+\end{document}

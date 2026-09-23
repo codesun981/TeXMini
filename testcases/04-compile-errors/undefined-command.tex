@@ -1,0 +1,11 @@
+\documentclass{article}
+\begin{document}
+Line 3 is fine.
+
+The next line uses a command that does not exist:
+\thiscommanddoesnotexist{hello}
+
+Expected: problem list shows an \textbf{error} "Undefined control sequence" at
+line 6, the gutter shows a red dot on line 6, and the status bar button
+("locate error: line 6") jumps there.
+\end{document}

@@ -1,0 +1,24 @@
+\documentclass{article}
+\begin{document}
+\section{External modification}
+Keep this file open in TeXMini and run \texttt{./append.sh} in a terminal.
+
+Case A (editor clean): the new line must appear automatically and the status
+bar says "updated on disk, reloaded". Cursor and scroll position stay put.
+
+Case B (editor dirty): type something first, then run the script. A dialog
+must offer Reload / Keep my changes. Choose Keep, press Cmd-S: the disk version is
+overwritten with the editor's text (the appended line is gone). Run the script
+again, choose Reload: the editor now shows the appended line and your typing is gone.
+
+Case C: run \texttt{./touch-only.sh} (mtime changes, content identical): nothing
+should happen, no dialog.
+
+Case D: delete the file in Finder while open. The editor keeps its content; Cmd-S
+recreates the file (or asks where to save --- record which).
+
+Case E: switch to another app, run append.sh, switch back: the check must also
+happen on window activation.
+
+% appended lines go below
+\end{document}

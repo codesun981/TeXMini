@@ -1,0 +1,19 @@
+\documentclass{article}
+\usepackage[backend=biber,style=numeric,sorting=nyt]{biblatex}
+\addbibresource{refs.bib}
+\usepackage{hyperref}
+\title{biblatex + biber}
+\begin{document}
+\maketitle
+Modern pipeline: pdflatex -> biber -> pdflatex -> pdflatex. latexmk detects
+\texttt{.bcf} and runs biber automatically.
+
+We cite \textcite{knuth1984}, \parencite{lamport1994} and
+\autocite{goossens1994}.
+
+After the first successful build, run Clean and Rebuild (Opt-Cmd-B): the \texttt{.bbl},
+\texttt{.bcf} and \texttt{.run.xml} files are deleted and the bibliography must
+come back intact.
+
+\printbibliography
+\end{document}

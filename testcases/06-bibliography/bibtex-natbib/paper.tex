@@ -1,0 +1,20 @@
+\documentclass{article}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{hyperref}
+\title{BibTeX + natbib}
+\begin{document}
+\maketitle
+Classic pipeline: pdflatex -> bibtex -> pdflatex -> pdflatex. latexmk must run all
+of it on a single Cmd-B and the reference list must appear at the bottom on the
+\emph{first} build (no "?" citations after the build finishes).
+
+We cite \citet{knuth1984}, \citep{lamport1994} and \citep{knuth1984,goossens1994}.
+
+Put the cursor inside \verb|\cite{| below and press Ctrl-Space: keys from
+\texttt{refs.bib} in this folder must be listed.
+
+\cite{}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+\end{document}

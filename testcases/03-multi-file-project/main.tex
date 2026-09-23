@@ -1,0 +1,25 @@
+\documentclass[12pt]{report}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage[numbers]{natbib}
+\usepackage{hyperref}
+
+\title{Multi-file project: main.tex is the root}
+\author{TeXMini Test Suite}
+
+\begin{document}
+\maketitle
+\tableofcontents
+
+% 三个章节分别测试：\include、\input、以及带 % !TEX root 的子文件
+\include{chapters/intro}
+\input{chapters/method}
+\input{chapters/results}
+
+\appendix
+\input{appendix/appendix}
+
+\bibliographystyle{plainnat}
+\bibliography{refs}
+
+\end{document}
