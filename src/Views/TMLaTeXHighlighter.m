@@ -1,6 +1,7 @@
 #import "TMLaTeXHighlighter.h"
 
 static CGFloat gBaseFontSize = 13.5;
+static NSString *gBaseFontName = @"Menlo";
 
 @implementation TMLaTeXHighlighter
 
@@ -12,8 +13,16 @@ static CGFloat gBaseFontSize = 13.5;
     return gBaseFontSize;
 }
 
++ (void)setBaseFontName:(NSString *)name {
+    gBaseFontName = name.length ? [name copy] : @"Menlo";
+}
+
++ (NSString *)baseFontName {
+    return gBaseFontName;
+}
+
 + (NSFont *)baseFont {
-    return [NSFont fontWithName:@"Menlo" size:gBaseFontSize]
+    return [NSFont fontWithName:gBaseFontName size:gBaseFontSize]
         ?: [NSFont monospacedSystemFontOfSize:gBaseFontSize weight:NSFontWeightRegular];
 }
 

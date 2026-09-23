@@ -67,7 +67,7 @@
     _enginePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
     _enginePopup.bezelStyle = NSBezelStyleInline;
     _enginePopup.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
-    [_enginePopup addItemsWithTitles:@[@"自动 (latexmk)", @"xelatex", @"pdflatex"]];
+    [_enginePopup addItemsWithTitles:@[@"自动 (latexmk)", @"xelatex", @"pdflatex", @"lualatex"]];
     _enginePopup.target = self;
     _enginePopup.action = @selector(engineChanged:);
     _enginePopup.translatesAutoresizingMaskIntoConstraints = NO;

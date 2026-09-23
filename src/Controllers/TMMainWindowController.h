@@ -50,6 +50,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)increaseEditorFontSize;
 - (void)decreaseEditorFontSize;
 - (void)resetEditorFontSize;
+/// 从 TMPreferences 重新应用全部偏好（字体、换行、引擎、编译参数、自动编译）。
+- (void)applyPreferences;
 
 @end
 

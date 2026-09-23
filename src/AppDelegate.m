@@ -2,6 +2,8 @@
 #import "TMDocument.h"
 #import "TMCompiler.h"
 #import "TMRecentFiles.h"
+#import "TMPreferences.h"
+#import "TMPreferencesWindowController.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 @interface AppDelegate () <NSMenuDelegate>
@@ -9,6 +11,10 @@
 @end
 
 @implementation AppDelegate
+
+- (void)applicationWillFinishLaunching:(NSNotification *)notification {
+    [TMPreferences registerDefaults];
+}
 
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     [self setupMainMenu];
@@ -56,6 +62,8 @@
     NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"TeXMini"];
     [appMenu addItemWithTitle:@"关于 TeXMini" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    [appMenu addItemWithTitle:@"偏好设置…" action:@selector(showPreferencesAction:) keyEquivalent:@","];
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"隐藏 TeXMini" action:@selector(hide:) keyEquivalent:@"h"];
     [appMenu addItemWithTitle:@"隐藏其他" action:@selector(hideOtherApplications:) keyEquivalent:@"h"];
@@ -118,7 +126,15 @@
     [editMenu addItemWithTitle:@"增加缩进" action:@selector(indentSelection:) keyEquivalent:@"]"];
     [editMenu addItemWithTitle:@"减少缩进" action:@selector(outdentSelection:) keyEquivalent:@"["];
     [editMenu addItem:[NSMenuItem separatorItem]];
-    [editMenu addItemWithTitle:@"拼写检查（输入时）" action:@selector(toggleContinuousSpellChecking:) keyEquivalent:@""];
+    NSMenuItem *spellingItem = [[NSMenuItem alloc] initWithTitle:@"拼写和语法" action:nil keyEquivalent:@""];
+    NSMenu *spellingMenu = [[NSMenu alloc] initWithTitle:@"拼写和语法"];
+    [spellingMenu addItemWithTitle:@"显示拼写和语法" action:@selector(showGuessPanel:) keyEquivalent:@":"];
+    [spellingMenu addItemWithTitle:@"检查文稿" action:@selector(checkSpelling:) keyEquivalent:@";"];
+    [spellingMenu addItem:[NSMenuItem separatorItem]];
+    [spellingMenu addItemWithTitle:@"输入时检查拼写" action:@selector(toggleContinuousSpellChecking:) keyEquivalent:@""];
+    [spellingMenu addItemWithTitle:@"随拼写检查语法" action:@selector(toggleGrammarChecking:) keyEquivalent:@""];
+    spellingItem.submenu = spellingMenu;
+    [editMenu addItem:spellingItem];
     editMenuItem.submenu = editMenu;
     [mainMenu addItem:editMenuItem];
 
@@ -128,6 +144,7 @@
     [compileMenu addItemWithTitle:@"保存并编译" action:@selector(compileDocumentAction:) keyEquivalent:@"b"];
     [compileMenu addItemWithTitle:@"取消编译" action:@selector(cancelCompileAction:) keyEquivalent:@"."];
     [compileMenu addItemWithTitle:@"自动编译（停止输入后）" action:@selector(toggleAutoCompileAction:) keyEquivalent:@""];
+    [compileMenu addItemWithTitle:@"允许 Shell Escape (-shell-escape)" action:@selector(toggleShellEscapeAction:) keyEquivalent:@""];
     [compileMenu addItem:[NSMenuItem separatorItem]];
     [compileMenu addItemWithTitle:@"正向跳转至 PDF" action:@selector(forwardSyncAction:) keyEquivalent:@"j"];
     [compileMenu addItem:[NSMenuItem separatorItem]];
@@ -156,6 +173,8 @@
     fontDown.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     NSMenuItem *fontReset = [viewMenu addItemWithTitle:@"编辑器字体恢复默认" action:@selector(editorFontResetAction:) keyEquivalent:@"0"];
     fontReset.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    NSMenuItem *wrapItem = [viewMenu addItemWithTitle:@"自动换行" action:@selector(toggleSoftWrapAction:) keyEquivalent:@"w"];
+    wrapItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"切换日志抽屉" action:@selector(toggleLogAction:) keyEquivalent:@"L"];
     viewMenuItem.submenu = viewMenu;
@@ -264,6 +283,18 @@
     self.mainWindowController.autoCompileEnabled = !self.mainWindowController.autoCompileEnabled;
 }
 
+- (void)toggleShellEscapeAction:(id)sender {
+    [TMPreferences shared].shellEscapeEnabled = ![TMPreferences shared].shellEscapeEnabled;
+}
+
+- (void)toggleSoftWrapAction:(id)sender {
+    [TMPreferences shared].softWrapEnabled = ![TMPreferences shared].softWrapEnabled;
+}
+
+- (void)showPreferencesAction:(id)sender {
+    [[TMPreferencesWindowController shared] showPreferences];
+}
+
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
     SEL action = menuItem.action;
     if (action == @selector(cancelCompileAction:)) {
@@ -271,6 +302,14 @@
     }
     if (action == @selector(toggleAutoCompileAction:)) {
         menuItem.state = self.mainWindowController.autoCompileEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    if (action == @selector(toggleShellEscapeAction:)) {
+        menuItem.state = [TMPreferences shared].shellEscapeEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
+    }
+    if (action == @selector(toggleSoftWrapAction:)) {
+        menuItem.state = [TMPreferences shared].softWrapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
         return YES;
     }
     if (action == @selector(exportPDFAction:) || action == @selector(revealPDFAction:)) {

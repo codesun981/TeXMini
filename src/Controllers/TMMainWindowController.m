@@ -11,10 +11,10 @@
 #import "TMRecentFiles.h"
 #import "TMProject.h"
 #import "TMFileWatcher.h"
+#import "TMPreferences.h"
+#import "TMLaTeXHighlighter.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
-static NSString *const kTMDefaultsEngine = @"TMEngine";
-static NSString *const kTMDefaultsFontSize = @"TMEditorFontSize";
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 
 @interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate>
@@ -74,13 +74,17 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         _documentModel = document ?: [TMDocument documentWithDefaultTemplate];
         _currentCursorLine = 1;
         _currentCursorCol = 1;
-        _autoCompileEnabled = [defaults boolForKey:@"TMAutoCompile"];
+        _autoCompileEnabled = [TMPreferences shared].autoCompileEnabled;
         window.delegate = self;
 
         [self setupUI];
         [self setupToolbar];
         [TMCompiler sharedCompiler].delegate = self;
-        [self restorePersistedPreferences];
+        [self applyPreferences];
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(preferencesDidChange:)
+                                                     name:TMPreferencesDidChangeNotification
+                                                   object:nil];
         [self loadDocumentIntoEditor];
 
         // 侧边栏折叠状态：等 UI 建好后再应用，避免动画
@@ -291,27 +295,37 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
     self.window.toolbarStyle = NSWindowToolbarStyleUnified;
 }
 
-#pragma mark - 偏好持久化
+#pragma mark - 偏好应用
 
-- (void)restorePersistedPreferences {
-    NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
-
-    if ([defaults objectForKey:kTMDefaultsEngine]) {
-        NSInteger engine = [defaults integerForKey:kTMDefaultsEngine];
-        if (engine >= TMTeXEngineLatexmk && engine <= TMTeXEnginePDFLaTeX) {
-            [TMCompiler sharedCompiler].engine = (TMTeXEngine)engine;
-            [self.statusBar setSelectedEngine:(TMTeXEngine)engine];
-        }
-    }
-
-    CGFloat fontSize = [defaults doubleForKey:kTMDefaultsFontSize];
-    if (fontSize >= 9.0 && fontSize <= 30.0) {
-        self.editorTextView.editorFontSize = fontSize;
-    }
+- (void)preferencesDidChange:(NSNotification *)note {
+    [self applyPreferences];
 }
 
-- (void)persistEditorFontSize {
-    [[NSUserDefaults standardUserDefaults] setDouble:self.editorTextView.editorFontSize forKey:kTMDefaultsFontSize];
+/// 把 TMPreferences 里的值整体应用到编辑器 / 编译器 / 状态栏。幂等，随时可调。
+- (void)applyPreferences {
+    TMPreferences *p = [TMPreferences shared];
+
+    NSInteger engine = p.defaultEngine;
+    if (engine < TMTeXEngineLatexmk || engine > TMTeXEngineLuaLaTeX) engine = TMTeXEngineLatexmk;
+    [TMCompiler sharedCompiler].engine = (TMTeXEngine)engine;
+    [TMCompiler sharedCompiler].shellEscapeEnabled = p.shellEscapeEnabled;
+    [TMCompiler sharedCompiler].extraArguments = [TMPreferences argumentsFromString:p.latexmkExtraArguments];
+    [self.statusBar setSelectedEngine:(TMTeXEngine)engine];
+
+    if (![self.editorTextView.editorFontName isEqualToString:p.editorFontName] ||
+        fabs(self.editorTextView.editorFontSize - p.editorFontSize) > 0.01) {
+        [TMLaTeXHighlighter setBaseFontSize:p.editorFontSize];
+        self.editorTextView.editorFontName = p.editorFontName; // 内部会重排 + 重着色
+    }
+    if (self.editorTextView.softWrapEnabled != p.softWrapEnabled) {
+        self.editorTextView.softWrapEnabled = p.softWrapEnabled;
+    }
+
+    _autoCompileEnabled = p.autoCompileEnabled;
+    if (!_autoCompileEnabled) {
+        [self.autoCompileTimer invalidate];
+        self.autoCompileTimer = nil;
+    }
 }
 
 #pragma mark - NSSplitViewDelegate (内层 代码|PDF 分栏，保证永不塌陷)
@@ -795,12 +809,9 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 #pragma mark - 自动编译
 
 - (void)setAutoCompileEnabled:(BOOL)enabled {
+    if (_autoCompileEnabled == enabled) return;
     _autoCompileEnabled = enabled;
-    [[NSUserDefaults standardUserDefaults] setBool:enabled forKey:@"TMAutoCompile"];
-    if (!enabled) {
-        [self.autoCompileTimer invalidate];
-        self.autoCompileTimer = nil;
-    }
+    [TMPreferences shared].autoCompileEnabled = enabled; // 触发通知 → applyPreferences 收尾
 }
 
 - (void)scheduleAutoCompile {
@@ -980,18 +991,15 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 #pragma mark - 编辑器字号
 
 - (void)increaseEditorFontSize {
-    self.editorTextView.editorFontSize = self.editorTextView.editorFontSize + 1.0;
-    [self persistEditorFontSize];
+    [TMPreferences shared].editorFontSize = self.editorTextView.editorFontSize + 1.0;
 }
 
 - (void)decreaseEditorFontSize {
-    self.editorTextView.editorFontSize = self.editorTextView.editorFontSize - 1.0;
-    [self persistEditorFontSize];
+    [TMPreferences shared].editorFontSize = self.editorTextView.editorFontSize - 1.0;
 }
 
 - (void)resetEditorFontSize {
-    self.editorTextView.editorFontSize = 13.5;
-    [self persistEditorFontSize];
+    [TMPreferences shared].editorFontSize = 13.5;
 }
 
 #pragma mark - TMStatusBarViewDelegate
@@ -1006,8 +1014,7 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 }
 
 - (void)statusBarDidChangeEngine:(TMTeXEngine)engine {
-    [TMCompiler sharedCompiler].engine = engine;
-    [[NSUserDefaults standardUserDefaults] setInteger:engine forKey:kTMDefaultsEngine];
+    [TMPreferences shared].defaultEngine = engine; // 通知 → applyPreferences 更新编译器
 }
 
 #pragma mark - 大纲解析与侧边栏控制
@@ -1289,17 +1296,14 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
 - (void)applyDefaultTemplate:(id)sender {
     if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
     self.documentModel = [TMDocument documentWithDefaultTemplate];
-    [self.statusBar setSelectedEngine:TMTeXEngineLatexmk];
-    [TMCompiler sharedCompiler].engine = TMTeXEngineLatexmk;
     [self loadDocumentIntoEditor];
     [self compileCurrentDocument];
 }
 
 - (void)applyChineseTemplate:(id)sender {
     if (![self confirmDiscardChangesWithTitle:@"切换模板前是否保存更改？"]) return;
+    // 不强行切引擎：自动模式会根据 ctex 选 XeLaTeX，用户手选的引擎也不应被模板覆盖
     self.documentModel = [TMDocument documentWithChineseTemplate];
-    [self.statusBar setSelectedEngine:TMTeXEngineXeLaTeX];
-    [TMCompiler sharedCompiler].engine = TMTeXEngineXeLaTeX;
     [self loadDocumentIntoEditor];
     [self compileCurrentDocument];
 }

@@ -8,6 +8,8 @@
 #import "TMRecentFiles.h"
 #import "TMProject.h"
 #import "TMCompletionProvider.h"
+#import "TMPreferences.h"
+#import "TMCompiler.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -193,6 +195,32 @@ TM_TEST(test_log_parser_native_error_has_no_file_path_and_kind_labels) {
 }
 
 #pragma mark - TMRecentFiles
+
+TM_TEST(test_preferences_argument_splitting_handles_quotes_and_whitespace) {
+    NSArray *args = [TMPreferences argumentsFromString:@"  -outdir=build   -bibtex \"-usepretex=\\def\\x{1 2}\"\n-g"];
+    TM_ASSERT_EQ_INT(args.count, 4);
+    TM_ASSERT_EQ_STR(args[0], @"-outdir=build");
+    TM_ASSERT_EQ_STR(args[2], @"-usepretex=\\def\\x{1 2}");
+    TM_ASSERT_EQ_STR(args[3], @"-g");
+    TM_ASSERT_EQ_INT([TMPreferences argumentsFromString:@"   "].count, 0);
+}
+
+TM_TEST(test_compiler_arguments_include_shell_escape_and_extras_before_filename) {
+    NSArray *args = [TMCompiler argumentsForEngineName:@"xelatex" useLatexmk:YES workingDir:@"/w" fileName:@"m.tex"
+                                            shellEscape:YES extraArguments:@[@"-outdir=build", @""]];
+    TM_ASSERT_EQ_STR(args.firstObject, @"-xelatex");
+    TM_ASSERT_TRUE([args containsObject:@"-shell-escape"]);
+    TM_ASSERT_TRUE([args containsObject:@"-outdir=build"]);
+    TM_ASSERT_EQ_STR(args.lastObject, @"m.tex");
+    TM_ASSERT_EQ_INT([args indexOfObject:@"-shell-escape"] < [args indexOfObject:@"-outdir=build"], 1);
+
+    NSArray *plain = [TMCompiler argumentsForEngineName:@"pdflatex" useLatexmk:NO workingDir:@"/w" fileName:@"m.tex"
+                                             shellEscape:NO extraArguments:nil];
+    TM_ASSERT_TRUE(![plain containsObject:@"-shell-escape"]);
+    TM_ASSERT_TRUE(![plain containsObject:@"-pdf"]);
+    TM_ASSERT_EQ_STR(plain.firstObject, @"-synctex=1");
+    TM_ASSERT_EQ_STR([TMCompiler argumentsForEngineName:@"lualatex" useLatexmk:YES workingDir:@"/w" fileName:@"m.tex" shellEscape:NO extraArguments:nil].firstObject, @"-lualatex");
+}
 
 TM_TEST(test_recent_files_most_recent_first_and_deduplicated) {
     [TMRecentFiles clear];

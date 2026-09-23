@@ -37,6 +37,7 @@ clang -fobjc-arc -O2 \
     src/Services/TMProject.m \
     src/Services/TMCompletionProvider.m \
     src/Services/TMFileWatcher.m \
+    src/Services/TMPreferences.m \
     src/Views/TMLineNumberRulerView.m \
     src/Views/TMLaTeXHighlighter.m \
     src/Views/TMEditorTextView.m \
@@ -46,6 +47,7 @@ clang -fobjc-arc -O2 \
     src/Views/TMFileBrowserView.m \
     src/Views/TMOutlineSidebarView.m \
     src/Controllers/TMMainWindowController.m \
+    src/Controllers/TMPreferencesWindowController.m \
     src/AppDelegate.m \
     src/main.m \
     -o "${MACOS_DIR}/${APP_NAME}"

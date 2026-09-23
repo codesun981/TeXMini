@@ -23,6 +23,8 @@
     if (self) {
         _engine = TMTeXEngineLatexmk;
         _isCompiling = NO;
+        _shellEscapeEnabled = NO;
+        _extraArguments = @[];
     }
     return self;
 }
@@ -55,6 +57,7 @@
         case TMTeXEngineLatexmk: return [self findExecutableNamed:@"latexmk"];
         case TMTeXEngineXeLaTeX: return [self findExecutableNamed:@"xelatex"];
         case TMTeXEnginePDFLaTeX: return [self findExecutableNamed:@"pdflatex"];
+        case TMTeXEngineLuaLaTeX: return [self findExecutableNamed:@"lualatex"];
     }
     return nil;
 }
@@ -71,6 +74,7 @@
 - (NSString *)effectiveEngineNameForContent:(NSString *)content {
     if (self.engine == TMTeXEngineXeLaTeX) return @"xelatex";
     if (self.engine == TMTeXEnginePDFLaTeX) return @"pdflatex";
+    if (self.engine == TMTeXEngineLuaLaTeX) return @"lualatex";
 
     NSString *program = [[TMMagicComments magicCommentsInString:content ?: @""][@"program"] lowercaseString];
     if ([program isEqualToString:@"xelatex"] || [program isEqualToString:@"pdflatex"] || [program isEqualToString:@"lualatex"]) {
@@ -84,6 +88,29 @@
     if ([name isEqualToString:@"xelatex"]) return @"-xelatex";
     if ([name isEqualToString:@"lualatex"]) return @"-lualatex";
     return @"-pdf";
+}
+
++ (NSArray<NSString *> *)argumentsForEngineName:(NSString *)engineName
+                                     useLatexmk:(BOOL)useLatexmk
+                                     workingDir:(NSString *)workingDir
+                                       fileName:(NSString *)fileName
+                                    shellEscape:(BOOL)shellEscape
+                                 extraArguments:(nullable NSArray<NSString *> *)extra {
+    NSMutableArray<NSString *> *args = [NSMutableArray array];
+    if (useLatexmk) [args addObject:[self latexmkFlagForEngineName:engineName]];
+    [args addObjectsFromArray:@[
+        @"-synctex=1",
+        @"-interaction=nonstopmode",
+        @"-halt-on-error",
+        @"-file-line-error"
+    ]];
+    if (shellEscape) [args addObject:@"-shell-escape"];
+    [args addObject:[NSString stringWithFormat:@"-output-directory=%@", workingDir]];
+    for (NSString *a in extra) {
+        if (a.length) [args addObject:a];
+    }
+    [args addObject:fileName];
+    return args;
 }
 
 #pragma mark - 编译
@@ -120,30 +147,15 @@
     NSString *baseName = [texFileURL.URLByDeletingPathExtension lastPathComponent];
     NSURL *expectedPDFURL = [[texFileURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:[baseName stringByAppendingPathExtension:@"pdf"]];
 
-    NSString *execPath = nil;
-    NSMutableArray<NSString *> *args = [NSMutableArray array];
-    if (latexmkPath) {
-        execPath = latexmkPath;
-        [args addObjectsFromArray:@[
-            [TMCompiler latexmkFlagForEngineName:engineName],
-            @"-synctex=1",
-            @"-interaction=nonstopmode",
-            @"-halt-on-error",
-            @"-file-line-error",
-            [NSString stringWithFormat:@"-output-directory=%@", workingDir],
-            fileName
-        ]];
-    } else if (enginePath) {
-        execPath = enginePath;
-        [args addObjectsFromArray:@[
-            @"-synctex=1",
-            @"-interaction=nonstopmode",
-            @"-halt-on-error",
-            @"-file-line-error",
-            [NSString stringWithFormat:@"-output-directory=%@", workingDir],
-            fileName
-        ]];
-    }
+    NSString *execPath = latexmkPath ?: enginePath;
+    NSArray<NSString *> *args = execPath
+        ? [TMCompiler argumentsForEngineName:engineName
+                                  useLatexmk:(latexmkPath != nil)
+                                  workingDir:workingDir
+                                    fileName:fileName
+                                 shellEscape:self.shellEscapeEnabled
+                              extraArguments:self.extraArguments]
+        : @[];
 
     if (!execPath) {
         if ([self.delegate respondsToSelector:@selector(compilerDidFailWithError:line:fullLog:issues:)]) {

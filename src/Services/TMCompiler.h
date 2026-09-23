@@ -6,7 +6,8 @@ NS_ASSUME_NONNULL_BEGIN
 typedef NS_ENUM(NSInteger, TMTeXEngine) {
     TMTeXEngineLatexmk = 0,   // 自动：魔法注释 → ctex 启发式 → pdflatex
     TMTeXEngineXeLaTeX,
-    TMTeXEnginePDFLaTeX
+    TMTeXEnginePDFLaTeX,
+    TMTeXEngineLuaLaTeX
 };
 
 @protocol TMCompilerDelegate <NSObject>
@@ -22,12 +23,24 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 
 @property (nonatomic, weak) id<TMCompilerDelegate> delegate;
 @property (nonatomic, assign) TMTeXEngine engine;
+/// 传 -shell-escape（minted / TikZ externalize 需要）。默认 NO。
+@property (nonatomic, assign) BOOL shellEscapeEnabled;
+/// 追加到命令行末尾（文件名之前）的额外参数，例如 @[@"-outdir=build"]。
+@property (nonatomic, copy) NSArray<NSString *> *extraArguments;
 @property (nonatomic, readonly) BOOL isCompiling;
 
 + (instancetype)sharedCompiler;
 + (nullable NSString *)findExecutablePathForEngine:(TMTeXEngine)engine;
 + (nullable NSString *)findExecutableNamed:(NSString *)name;
 + (BOOL)isMacTeXInstalled;
+
+/// 组装命令行参数（不含可执行文件本身）。useLatexmk=YES 时第一个参数是 -pdf / -xelatex / -lualatex。
++ (NSArray<NSString *> *)argumentsForEngineName:(NSString *)engineName
+                                     useLatexmk:(BOOL)useLatexmk
+                                     workingDir:(NSString *)workingDir
+                                       fileName:(NSString *)fileName
+                                    shellEscape:(BOOL)shellEscape
+                                 extraArguments:(nullable NSArray<NSString *> *)extra;
 
 /// 编译 texFileURL。若文件声明了 `% !TEX root`，实际编译 root 文件���回调里的 pdfURL 也对应 root。
 /// 只要 latexmk 可用就统一走 latexmk（自动跑够遍数），显式选择的引擎映射为 -xelatex / -pdf；

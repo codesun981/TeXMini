@@ -7,6 +7,7 @@ static NSString *const kTMIndentUnit = @"  ";
 @implementation TMEditorTextView
 
 - (void)setupEditor {
+    _softWrapEnabled = YES;
     self.allowsUndo = YES;
     self.automaticQuoteSubstitutionEnabled = NO;
     self.automaticDashSubstitutionEnabled = NO;
@@ -48,6 +49,44 @@ static NSString *const kTMIndentUnit = @"  ";
 
 - (CGFloat)editorFontSize {
     return [TMLaTeXHighlighter baseFontSize];
+}
+
+- (void)setEditorFontName:(NSString *)editorFontName {
+    [TMLaTeXHighlighter setBaseFontName:editorFontName];
+    self.font = [TMLaTeXHighlighter baseFont];
+    [self rehighlightAll];
+    [self.enclosingScrollView.verticalRulerView setNeedsDisplay:YES];
+}
+
+- (NSString *)editorFontName {
+    return [TMLaTeXHighlighter baseFontName];
+}
+
+#pragma mark - 自动换行
+
+- (void)setSoftWrapEnabled:(BOOL)softWrapEnabled {
+    _softWrapEnabled = softWrapEnabled;
+    NSScrollView *scrollView = self.enclosingScrollView;
+    NSTextContainer *container = self.textContainer;
+    if (softWrapEnabled) {
+        self.horizontallyResizable = NO;
+        self.autoresizingMask = NSViewWidthSizable;
+        container.widthTracksTextView = YES;
+        CGFloat width = scrollView ? scrollView.contentSize.width : self.bounds.size.width;
+        container.containerSize = NSMakeSize(width, FLT_MAX);
+        [self setFrameSize:NSMakeSize(width, self.frame.size.height)];
+        scrollView.hasHorizontalScroller = NO;
+    } else {
+        container.widthTracksTextView = NO;
+        container.containerSize = NSMakeSize(FLT_MAX, FLT_MAX);
+        self.horizontallyResizable = YES;
+        self.autoresizingMask = NSViewNotSizable;
+        self.maxSize = NSMakeSize(FLT_MAX, FLT_MAX);
+        scrollView.hasHorizontalScroller = YES;
+    }
+    [self.layoutManager ensureLayoutForTextContainer:container];
+    [self sizeToFit];
+    [self setNeedsDisplay:YES];
 }
 
 #pragma mark - 括号匹配

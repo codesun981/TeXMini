@@ -22,6 +22,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 编辑器字号（9–30），设置后立即重排并重新着色。
 @property (nonatomic, assign) CGFloat editorFontSize;
+/// 编辑器字体名（PostScript 名或家族名，找不到时退回系统等宽字体）。
+@property (nonatomic, copy) NSString *editorFontName;
+/// 自动换行；关闭后出现横向滚动条。默认 YES。
+@property (nonatomic, assign) BOOL softWrapEnabled;
 
 /// 以下动作作用于选区覆盖的整行，可撤销。
 - (IBAction)toggleComment:(nullable id)sender;
