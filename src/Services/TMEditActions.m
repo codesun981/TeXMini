@@ -112,4 +112,66 @@
     return [line substringToIndex:i];
 }
 
+#pragma mark - 拖入图片 / 文件
+
++ (NSArray<NSString *> *)droppableImageExtensions {
+    return @[@"png", @"jpg", @"jpeg", @"pdf", @"eps"];
+}
+
++ (NSString *)labelSlugForFileName:(NSString *)fileName {
+    NSString *base = fileName.stringByDeletingPathExtension.lowercaseString;
+    NSMutableString *slug = [NSMutableString string];
+    BOOL lastDash = YES; // 开头不出现 '-'
+    for (NSUInteger i = 0; i < base.length; i++) {
+        unichar c = [base characterAtIndex:i];
+        BOOL ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+        if (ok) { [slug appendFormat:@"%C", c]; lastDash = NO; }
+        else if (!lastDash) { [slug appendString:@"-"]; lastDash = YES; }
+    }
+    while ([slug hasSuffix:@"-"]) [slug deleteCharactersInRange:NSMakeRange(slug.length - 1, 1)];
+    return slug.length ? slug : @"figure";
+}
+
++ (NSString *)figureSnippetForImagePath:(NSString *)relativePath label:(NSString *)label cursorOffset:(nullable NSUInteger *)cursorOffset {
+    NSString *head = [NSString stringWithFormat:
+        @"\\begin{figure}[htbp]\n"
+        @"  \\centering\n"
+        @"  \\includegraphics[width=0.8\\linewidth]{%@}\n"
+        @"  \\caption{", relativePath];
+    NSString *tail = [NSString stringWithFormat:
+        @"}\n"
+        @"  \\label{fig:%@}\n"
+        @"\\end{figure}\n", label];
+    if (cursorOffset) *cursorOffset = head.length;
+    return [head stringByAppendingString:tail];
+}
+
++ (NSUInteger)graphicxInsertionLocationInContent:(NSString *)content {
+    static NSRegularExpression *usepackageRegex;
+    static NSRegularExpression *documentclassRegex;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        usepackageRegex = [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*\\\\(?:usepackage|RequirePackage)(?:\\[[^\\]]*\\])?\\{[^}]*\\b(?:graphicx|graphbox)\\b[^}]*\\}"
+                                                                    options:NSRegularExpressionAnchorsMatchLines error:nil];
+        documentclassRegex = [NSRegularExpression regularExpressionWithPattern:@"^[ \\t]*\\\\documentclass(?:\\[[^\\]]*\\])?\\{[^}]*\\}[^\\n]*\\n?"
+                                                                       options:NSRegularExpressionAnchorsMatchLines error:nil];
+    });
+    NSRange all = NSMakeRange(0, content.length);
+    if ([usepackageRegex firstMatchInString:content options:0 range:all]) return NSNotFound;
+    NSTextCheckingResult *dc = [documentclassRegex firstMatchInString:content options:0 range:all];
+    if (!dc) return NSNotFound;
+    NSUInteger loc = NSMaxRange(dc.range);
+    // \documentclass 行若没有换行结尾（文件最后一行），插入点仍在其后，调用方会自行补换行
+    return loc;
+}
+
++ (nullable NSString *)relativePathFromDirectory:(NSURL *)directory toFile:(NSURL *)file {
+    NSString *dir = directory.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
+    NSString *path = file.URLByStandardizingPath.URLByResolvingSymlinksInPath.path;
+    if (!dir.length || !path.length) return nil;
+    NSString *prefix = [dir hasSuffix:@"/"] ? dir : [dir stringByAppendingString:@"/"];
+    if (![path hasPrefix:prefix]) return nil;
+    return [path substringFromIndex:prefix.length];
+}
+
 @end

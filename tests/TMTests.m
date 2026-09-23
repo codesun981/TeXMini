@@ -103,6 +103,37 @@ TM_TEST(test_recent_folders_are_separate_from_files_and_cleared_together) {
     TM_ASSERT_EQ_INT([TMRecentFiles recentFileURLs].count, 0);
 }
 
+TM_TEST(test_drop_helpers_label_slug_and_figure_snippet) {
+    TM_ASSERT_EQ_STR([TMEditActions labelSlugForFileName:@"My Plot (v2).PNG"], @"my-plot-v2");
+    TM_ASSERT_EQ_STR([TMEditActions labelSlugForFileName:@"___.png"], @"figure");
+    NSUInteger off = 0;
+    NSString *snip = [TMEditActions figureSnippetForImagePath:@"figures/a.png" label:@"a" cursorOffset:&off];
+    TM_ASSERT_TRUE([snip containsString:@"\\includegraphics[width=0.8\\linewidth]{figures/a.png}"]);
+    TM_ASSERT_TRUE([snip containsString:@"\\label{fig:a}"]);
+    TM_ASSERT_TRUE([snip hasSuffix:@"\\end{figure}\n"]);
+    TM_ASSERT_TRUE([[snip substringToIndex:off] hasSuffix:@"\\caption{"]);
+    TM_ASSERT_EQ_INT([snip characterAtIndex:off], '}');
+}
+
+TM_TEST(test_graphicx_insertion_location) {
+    NSString *withPkg = @"\\documentclass{article}\n\\usepackage[final]{graphicx}\n\\begin{document}\n";
+    TM_ASSERT_EQ_INT([TMEditActions graphicxInsertionLocationInContent:withPkg], NSNotFound);
+    NSString *combined = @"\\documentclass{article}\n\\usepackage{amsmath,graphicx}\n";
+    TM_ASSERT_EQ_INT([TMEditActions graphicxInsertionLocationInContent:combined], NSNotFound);
+    NSString *without = @"% comment\n\\documentclass[11pt]{article} % opts\n\\usepackage{amsmath}\n";
+    NSUInteger loc = [TMEditActions graphicxInsertionLocationInContent:without];
+    TM_ASSERT_EQ_STR([without substringFromIndex:loc], @"\\usepackage{amsmath}\n");
+    TM_ASSERT_EQ_INT([TMEditActions graphicxInsertionLocationInContent:@"no class here"], NSNotFound);
+}
+
+TM_TEST(test_relative_path_from_directory) {
+    NSURL *dir = [NSURL fileURLWithPath:@"/tmp/proj"];
+    TM_ASSERT_EQ_STR([TMEditActions relativePathFromDirectory:dir toFile:[NSURL fileURLWithPath:@"/tmp/proj/figs/a.png"]], @"figs/a.png");
+    TM_ASSERT_EQ_STR([TMEditActions relativePathFromDirectory:[NSURL fileURLWithPath:@"/tmp/proj/"] toFile:[NSURL fileURLWithPath:@"/tmp/proj/a.png"]], @"a.png");
+    TM_ASSERT_NIL([TMEditActions relativePathFromDirectory:dir toFile:[NSURL fileURLWithPath:@"/tmp/projects/a.png"]]);
+    TM_ASSERT_NIL([TMEditActions relativePathFromDirectory:dir toFile:[NSURL fileURLWithPath:@"/Users/x/a.png"]]);
+}
+
 #pragma mark - TMEditActions
 
 TM_TEST(test_toggle_comment_adds_prefix_to_every_line) {

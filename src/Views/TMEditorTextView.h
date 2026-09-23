@@ -8,6 +8,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)editorTextViewDidChangeCursorPositionToLine:(NSInteger)line column:(NSInteger)column;
 /// 用户在编辑器里 ⌘+点击（与 PDF 里 ⌘+点击对称）：请求正向同步到 PDF。
 - (void)editorTextViewDidRequestForwardSync;
+/// 用户把文件从访达拖进了编辑器。返回 YES 表示已处理（控制器插入了 \includegraphics / \input 等）；
+/// NO 则退回系统默认行为。
+- (BOOL)editorTextView:(NSTextView *)textView didDropFileURLs:(NSArray<NSURL *> *)urls atCharacterIndex:(NSUInteger)index;
 @end
 
 @interface TMEditorTextView : NSTextView
@@ -19,6 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setupEditor;
 - (void)jumpToLine:(NSInteger)lineNumber column:(NSInteger)column;
 - (void)rehighlightAll;
+/// 可撤销地在 location 插入文本，光标停在 location + cursorOffset。
+- (void)insertSnippet:(NSString *)snippet atLocation:(NSUInteger)location cursorOffset:(NSUInteger)cursorOffset;
 
 /// 编辑器字号（9–30），设置后立即重排并重新着色。
 @property (nonatomic, assign) CGFloat editorFontSize;

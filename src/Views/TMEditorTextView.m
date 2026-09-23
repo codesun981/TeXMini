@@ -22,6 +22,10 @@ static NSString *const kTMIndentUnit = @"  ";
 
     self.textContainerInset = NSMakeSize(8, 8);
     self.textContainer.lineFragmentPadding = 4;
+    // 接收从访达拖进来的文件（图片 → figure，.tex → \input）
+    NSMutableArray *types = [self.registeredDraggedTypes mutableCopy] ?: [NSMutableArray array];
+    if (![types containsObject:NSPasteboardTypeFileURL]) [types addObject:NSPasteboardTypeFileURL];
+    [self registerForDraggedTypes:types];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(textStorageDidProcessEditingNotification:)
@@ -423,6 +427,54 @@ static unichar TMMatchingBracket(unichar c) {
     if (event.clickCount == 2 && [self.editorDelegate respondsToSelector:@selector(editorTextViewDidRequestForwardSync)]) {
         [self.editorDelegate editorTextViewDidRequestForwardSync];
     }
+}
+
+#pragma mark - 拖放文件
+
+- (NSArray<NSURL *> *)fileURLsInDraggingInfo:(id<NSDraggingInfo>)sender {
+    NSArray *urls = [sender.draggingPasteboard readObjectsForClasses:@[[NSURL class]]
+                                                            options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+    return urls ?: @[];
+}
+
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    if ([self fileURLsInDraggingInfo:sender].count > 0) return NSDragOperationCopy;
+    return [super draggingEntered:sender];
+}
+
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    if ([self fileURLsInDraggingInfo:sender].count > 0) {
+        // 让插入点跟随鼠标，用户能看到将插在哪一行
+        NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
+        NSUInteger idx = [self characterIndexForInsertionAtPoint:p];
+        [self setSelectedRange:NSMakeRange(MIN(idx, self.string.length), 0)];
+        return NSDragOperationCopy;
+    }
+    return [super draggingUpdated:sender];
+}
+
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    NSArray<NSURL *> *urls = [self fileURLsInDraggingInfo:sender];
+    if (urls.count > 0 && [self.editorDelegate respondsToSelector:@selector(editorTextView:didDropFileURLs:atCharacterIndex:)]) {
+        NSPoint p = [self convertPoint:sender.draggingLocation fromView:nil];
+        NSUInteger idx = MIN([self characterIndexForInsertionAtPoint:p], self.string.length);
+        if ([self.editorDelegate editorTextView:self didDropFileURLs:urls atCharacterIndex:idx]) {
+            [self.window makeFirstResponder:self];
+            return YES;
+        }
+    }
+    return [super performDragOperation:sender];
+}
+
+/// 可撤销地在 location 插入文本并把光标放到 location + cursorOffset。
+- (void)insertSnippet:(NSString *)snippet atLocation:(NSUInteger)location cursorOffset:(NSUInteger)cursorOffset {
+    NSRange range = NSMakeRange(MIN(location, self.string.length), 0);
+    if (![self shouldChangeTextInRange:range replacementString:snippet]) return;
+    [self.textStorage replaceCharactersInRange:range withString:snippet];
+    [self didChangeText];
+    NSUInteger cursor = range.location + MIN(cursorOffset, snippet.length);
+    [self setSelectedRange:NSMakeRange(cursor, 0)];
+    [self scrollRangeToVisible:NSMakeRange(cursor, 0)];
 }
 
 #pragma mark - 光标行列位置更新

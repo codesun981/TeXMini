@@ -13,6 +13,7 @@
 #import "TMFileWatcher.h"
 #import "TMPreferences.h"
 #import "TMLaTeXHighlighter.h"
+#import "TMEditActions.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
@@ -1036,6 +1037,108 @@ static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
         words++;
     }];
     [self.statusBar setWordCount:words];
+}
+
+#pragma mark - 拖入图片 / 文件
+
+/// 图片与 .tex 走这里：图片 → figure 骨架（项目外的图片先复制进 figures/），.tex → \input{}。其他类型交回系统。
+- (BOOL)editorTextView:(NSTextView *)textView didDropFileURLs:(NSArray<NSURL *> *)urls atCharacterIndex:(NSUInteger)index {
+    NSArray<NSString *> *imageExts = [TMEditActions droppableImageExtensions];
+    NSMutableArray<NSURL *> *images = [NSMutableArray array];
+    NSMutableArray<NSURL *> *texFiles = [NSMutableArray array];
+    for (NSURL *url in urls) {
+        NSString *ext = url.pathExtension.lowercaseString;
+        if ([imageExts containsObject:ext]) [images addObject:url];
+        else if ([ext isEqualToString:@"tex"]) [texFiles addObject:url];
+    }
+    if (images.count == 0 && texFiles.count == 0) return NO;
+
+    // 相对路径以主文件所在目录为基准（\includegraphics / \input 在 TeX 里就是这么解析的）
+    NSURL *main = [self mainFileURLForCompile];
+    if (!main || self.documentModel.isScratch) {
+        [self.statusBar showInfoMessage:@"请先保存文档，再拖入图片（路径要相对于 .tex 文件）"];
+        return YES;
+    }
+    NSURL *baseDir = main.URLByDeletingLastPathComponent;
+
+    NSMutableString *snippet = [NSMutableString string];
+    NSUInteger cursorOffset = NSNotFound;
+    for (NSURL *img in images) {
+        NSString *rel = [self relativePathForDroppedImage:img baseDirectory:baseDir];
+        if (!rel) continue;
+        NSUInteger off = 0;
+        NSString *block = [TMEditActions figureSnippetForImagePath:rel
+                                                             label:[TMEditActions labelSlugForFileName:rel.lastPathComponent]
+                                                      cursorOffset:&off];
+        if (cursorOffset == NSNotFound) cursorOffset = snippet.length + off;
+        [snippet appendString:block];
+    }
+    for (NSURL *tex in texFiles) {
+        NSString *rel = [TMEditActions relativePathFromDirectory:baseDir toFile:tex];
+        if (!rel) { rel = tex.path; }
+        [snippet appendFormat:@"\\input{%@}\n", rel.stringByDeletingPathExtension];
+    }
+    if (snippet.length == 0) return YES;
+
+    // 落在行中间时先换行，保证 figure 独占整行
+    NSString *text = self.editorTextView.string;
+    NSUInteger loc = MIN(index, text.length);
+    NSRange lineRange = [text lineRangeForRange:NSMakeRange(loc, 0)];
+    if (loc != lineRange.location) {
+        [snippet insertString:@"\n" atIndex:0];
+        if (cursorOffset != NSNotFound) cursorOffset += 1;
+    }
+    [self.editorTextView insertSnippet:snippet atLocation:loc cursorOffset:cursorOffset == NSNotFound ? snippet.length : cursorOffset];
+
+    if (images.count > 0) [self ensureGraphicxLoadedForMainFile:main];
+    [self.outlineSidebarView.fileBrowserView reload];
+    return YES;
+}
+
+/// 项目内的图片直接用相对路径；项目外的复制到主文件旁的 figures/，重名时加序号。
+- (nullable NSString *)relativePathForDroppedImage:(NSURL *)image baseDirectory:(NSURL *)baseDir {
+    NSString *rel = [TMEditActions relativePathFromDirectory:baseDir toFile:image];
+    if (rel) return rel;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSURL *figuresDir = [baseDir URLByAppendingPathComponent:@"figures" isDirectory:YES];
+    NSError *err = nil;
+    if (![fm createDirectoryAtURL:figuresDir withIntermediateDirectories:YES attributes:nil error:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return nil;
+    }
+    NSString *name = image.lastPathComponent;
+    NSURL *dest = [figuresDir URLByAppendingPathComponent:name];
+    NSUInteger n = 2;
+    while ([fm fileExistsAtPath:dest.path]) {
+        NSString *candidate = [NSString stringWithFormat:@"%@-%lu.%@", name.stringByDeletingPathExtension, (unsigned long)n++, name.pathExtension];
+        dest = [figuresDir URLByAppendingPathComponent:candidate];
+    }
+    if (![fm copyItemAtURL:image toURL:dest error:&err]) {
+        [[NSAlert alertWithError:err] runModal];
+        return nil;
+    }
+    [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已复制 %@ 到 figures/", dest.lastPathComponent]];
+    return [@"figures" stringByAppendingPathComponent:dest.lastPathComponent];
+}
+
+/// 当前编辑的就是主文件时直接在导言区插入 \usepackage{graphicx}；否则只提示。
+- (void)ensureGraphicxLoadedForMainFile:(NSURL *)main {
+    BOOL editingMain = [main.URLByStandardizingPath.path isEqualToString:self.documentModel.fileURL.URLByStandardizingPath.path];
+    NSString *content = editingMain ? self.editorTextView.string
+                                    : ([NSString stringWithContentsOfURL:main encoding:NSUTF8StringEncoding error:nil] ?: @"");
+    NSUInteger loc = [TMEditActions graphicxInsertionLocationInContent:content];
+    if (loc == NSNotFound) return;
+    if (!editingMain) {
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"主文件 %@ 尚未加载 graphicx，请在导言区加上 \\usepackage{graphicx}", main.lastPathComponent]];
+        return;
+    }
+    NSRange sel = self.editorTextView.selectedRange;
+    NSString *line = (loc > 0 && [content characterAtIndex:loc - 1] != '\n') ? @"\n\\usepackage{graphicx}\n" : @"\\usepackage{graphicx}\n";
+    [self.editorTextView insertSnippet:line atLocation:loc cursorOffset:0];
+    // 插在光标之前，把光标挪回原来的位置（仍在 \caption{ 里）
+    [self.editorTextView setSelectedRange:NSMakeRange(sel.location + (loc <= sel.location ? line.length : 0), 0)];
+    [self.editorTextView scrollRangeToVisible:self.editorTextView.selectedRange];
 }
 
 #pragma mark - 编辑器字号
