@@ -1486,43 +1486,25 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 #pragma mark - NSToolbarDelegate
 
 - (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
-    return @[
-        NSToolbarToggleSidebarItemIdentifier,
-        @"ToggleOutline",
-        NSToolbarSpaceItemIdentifier,
-        @"NewDoc",
-        @"TemplateDoc",
-        @"OpenDoc",
-        @"SaveDoc",
-        NSToolbarSpaceItemIdentifier,
-        @"CompileDoc",
-        @"ForwardSync",
-        @"ExportPDF",
-        @"CleanAux",
-        NSToolbarFlexibleSpaceItemIdentifier,
-        @"ZoomIn",
-        @"ZoomOut",
-        @"ToggleLog"
-    ];
+    return [self toolbarDefaultItemIdentifiers:toolbar];
 }
 
+/// 顺序：编译 | 新建 模板 打开 | 导出 清理 | …… | 放大 缩小 | 侧栏折叠（右上角）。
+/// 保存 / 同步 / 日志按钮已删：⌘S、双击、状态栏"编译日志"够用。
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
     return @[
-        NSToolbarToggleSidebarItemIdentifier,
+        @"CompileDoc",
         NSToolbarSpaceItemIdentifier,
         @"NewDoc",
         @"TemplateDoc",
         @"OpenDoc",
-        @"SaveDoc",
         NSToolbarSpaceItemIdentifier,
-        @"CompileDoc",
-        @"ForwardSync",
         @"ExportPDF",
         @"CleanAux",
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
         @"ZoomOut",
-        @"ToggleLog"
+        @"ToggleOutline"
     ];
 }
 
@@ -1557,13 +1539,6 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         item.image = [NSImage imageWithSystemSymbolName:@"folder" accessibilityDescription:@"Open"];
         item.target = self;
         item.action = @selector(openFileAction:);
-    } else if ([itemIdentifier isEqualToString:@"SaveDoc"]) {
-        item.label = @"保存";
-        item.paletteLabel = @"保存文件";
-        item.toolTip = @"保存当前代码 (⌘S)";
-        item.image = [NSImage imageWithSystemSymbolName:@"square.and.arrow.down" accessibilityDescription:@"Save"];
-        item.target = self;
-        item.action = @selector(saveCurrentDocument);
     } else if ([itemIdentifier isEqualToString:@"CompileDoc"]) {
         item.label = @"编译 (⌘B)";
         item.paletteLabel = @"编译文档";
@@ -1571,13 +1546,6 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         item.image = [NSImage imageWithSystemSymbolName:@"play.circle.fill" accessibilityDescription:@"Compile"];
         item.target = self;
         item.action = @selector(compileCurrentDocument);
-    } else if ([itemIdentifier isEqualToString:@"ForwardSync"]) {
-        item.label = @"同步 (⌘J)";
-        item.paletteLabel = @"正向跳转至 PDF";
-        item.toolTip = @"从代码光标跳转到 PDF 对应位置 (⌘J、双击或 ⌘+点击代码)";
-        item.image = [NSImage imageWithSystemSymbolName:@"arrow.right.circle" accessibilityDescription:@"Sync to PDF"];
-        item.target = self;
-        item.action = @selector(forwardSyncToPDF);
     } else if ([itemIdentifier isEqualToString:@"ExportPDF"]) {
         item.label = @"导出 PDF";
         item.paletteLabel = @"导出 PDF";
@@ -1602,11 +1570,6 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         item.image = [NSImage imageWithSystemSymbolName:@"minus.magnifyingglass" accessibilityDescription:@"Zoom Out"];
         item.target = self;
         item.action = @selector(zoomOut);
-    } else if ([itemIdentifier isEqualToString:@"ToggleLog"]) {
-        item.label = @"日志";
-        item.image = [NSImage imageWithSystemSymbolName:@"terminal" accessibilityDescription:@"Toggle Log"];
-        item.target = self;
-        item.action = @selector(toggleLogDrawer);
     }
 
     return item;
@@ -1620,14 +1583,80 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     [self loadDocumentIntoEditor];
 }
 
+/// 模板选择：一个简洁的 sheet，三个单选项 + 一句说明，回车即用。
 - (void)showTemplateMenuAction:(id)sender {
-    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Templates"];
-    [menu addItemWithTitle:@"📄 学术论文模板 (Article / Math)" action:@selector(applyDefaultTemplate:) keyEquivalent:@""];
-    [menu addItemWithTitle:@"🇨🇳 中文研究报告 (CTeX / XeLaTeX)" action:@selector(applyChineseTemplate:) keyEquivalent:@""];
-    [menu addItemWithTitle:@"📝 纯净空白文档 (Blank)" action:@selector(applyBlankTemplate:) keyEquivalent:@""];
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"从模板新建";
+    alert.informativeText = @"选择一个起点。当前文档若有未保存的更改会先询问。";
+    [alert addButtonWithTitle:@"使用模板"];
+    [alert addButtonWithTitle:@"取消"];
+    alert.buttons[1].keyEquivalent = @"\e";
 
-    NSView *targetView = [sender isKindOfClass:[NSView class]] ? sender : self.window.contentView;
-    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(80, self.window.contentView.bounds.size.height - 40) inView:targetView];
+    NSArray<NSArray<NSString *> *> *templates = @[
+        @[@"学术论文", @"article · amsmath · pdflatex，含标题、章节与公式示例"],
+        @[@"中文报告", @"ctexart · 自动使用 XeLaTeX，含中文排版与操作提示"],
+        @[@"空白文档", @"最小 article 骨架，只有 \\begin{document} … \\end{document}"],
+    ];
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 10;
+    NSMutableArray<NSButton *> *radios = [NSMutableArray array];
+    [templates enumerateObjectsUsingBlock:^(NSArray<NSString *> *t, NSUInteger idx, BOOL *stop) {
+        NSButton *radio = [NSButton radioButtonWithTitle:t[0] target:nil action:@selector(templateRadioChanged:)];
+        radio.tag = (NSInteger)idx;
+        radio.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+        radio.state = idx == 0 ? NSControlStateValueOn : NSControlStateValueOff;
+        NSTextField *desc = [NSTextField wrappingLabelWithString:t[1]];
+        desc.font = [NSFont systemFontOfSize:11];
+        desc.textColor = [NSColor secondaryLabelColor];
+        desc.preferredMaxLayoutWidth = 300;
+        NSStackView *row = [NSStackView stackViewWithViews:@[radio, desc]];
+        row.orientation = NSUserInterfaceLayoutOrientationVertical;
+        row.alignment = NSLayoutAttributeLeading;
+        row.spacing = 2;
+        row.edgeInsets = NSEdgeInsetsMake(0, 0, 0, 0);
+        desc.translatesAutoresizingMaskIntoConstraints = NO;
+        [desc.leadingAnchor constraintEqualToAnchor:radio.leadingAnchor constant:20].active = YES;
+        [stack addArrangedSubview:row];
+        [radios addObject:radio];
+    }];
+    for (NSButton *r in radios) { r.target = self; }
+    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 340, 150)];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [box addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:box.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor],
+        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:box.bottomAnchor],
+    ]];
+    [box layoutSubtreeIfNeeded];
+    box.frame = NSMakeRect(0, 0, 340, MAX(150.0, stack.fittingSize.height));
+    alert.accessoryView = box;
+    alert.window.initialFirstResponder = radios.firstObject;
+
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn) return;
+        NSInteger chosen = 0;
+        for (NSButton *r in radios) if (r.state == NSControlStateValueOn) chosen = r.tag;
+        switch (chosen) {
+            case 0: [self applyDefaultTemplate:nil]; break;
+            case 1: [self applyChineseTemplate:nil]; break;
+            default: [self applyBlankTemplate:nil]; break;
+        }
+    }];
+}
+
+- (void)templateRadioChanged:(NSButton *)sender {
+    // 兄弟 radio 互斥（它们在不同的行 stack 里，AppKit 不会自动分组）
+    NSView *container = sender.superview.superview;
+    for (NSView *row in container.subviews) {
+        for (NSView *v in row.subviews) {
+            if ([v isKindOfClass:[NSButton class]] && v != sender) ((NSButton *)v).state = NSControlStateValueOff;
+        }
+    }
+    sender.state = NSControlStateValueOn;
 }
 
 - (void)applyDefaultTemplate:(id)sender {
