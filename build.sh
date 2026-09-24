@@ -48,6 +48,7 @@ clang -fobjc-arc -O2 \
     src/Views/TMLaTeXHighlighter.m \
     src/Views/TMCompletionPopup.m \
     src/Views/TMDocumentFontView.m \
+    src/Views/TMWelcomeView.m \
     src/Views/TMEditorTextView.m \
     src/Views/TMPDFView.m \
     src/Views/TMStatusBarView.m \

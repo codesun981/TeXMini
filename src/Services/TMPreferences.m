@@ -7,6 +7,7 @@ static NSString *const kFontSize = @"TMEditorFontSize";
 static NSString *const kSoftWrap = @"TMSoftWrap";
 static NSString *const kCurrentLine = @"TMHighlightCurrentLine";
 static NSString *const kAutoSave = @"TMAutoSave";
+static NSString *const kRestoreSession = @"TMRestoreLastSession";
 static NSString *const kEngine = @"TMEngine";
 static NSString *const kAutoCompile = @"TMAutoCompile";
 static NSString *const kShellEscape = @"TMShellEscape";
@@ -30,6 +31,7 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
         kSoftWrap: @YES,
         kCurrentLine: @YES,
         kAutoSave: @YES,
+        kRestoreSession: @YES,
         kEngine: @0,
         kAutoCompile: @NO,
         kShellEscape: @NO,
@@ -75,6 +77,11 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
 
 - (BOOL)autoSaveEnabled { return [self.defaults boolForKey:kAutoSave]; }
 - (void)setAutoSaveEnabled:(BOOL)v { [self.defaults setBool:v forKey:kAutoSave]; [self didChange]; }
+
+#pragma mark - 启动
+
+- (BOOL)restoreLastSession { return [self.defaults boolForKey:kRestoreSession]; }
+- (void)setRestoreLastSession:(BOOL)v { [self.defaults setBool:v forKey:kRestoreSession]; [self didChange]; }
 
 #pragma mark - 编译
 

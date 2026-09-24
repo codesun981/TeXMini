@@ -278,6 +278,41 @@ TM_TEST(test_preferences_argument_splitting_handles_quotes_and_whitespace) {
     TM_ASSERT_EQ_INT([TMPreferences argumentsFromString:@"   "].count, 0);
 }
 
+TM_TEST(test_preferences_autosave_and_restore_default_on) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d removeObjectForKey:@"TMAutoSave"];
+    [d removeObjectForKey:@"TMRestoreLastSession"];
+    [TMPreferences registerDefaults];
+    TM_ASSERT_TRUE([TMPreferences shared].autoSaveEnabled);
+    TM_ASSERT_TRUE([TMPreferences shared].restoreLastSession);
+    [TMPreferences shared].autoSaveEnabled = NO;
+    TM_ASSERT_TRUE(![TMPreferences shared].autoSaveEnabled);
+    [d removeObjectForKey:@"TMAutoSave"];
+}
+
+TM_TEST(test_session_round_trip_and_missing_paths) {
+    NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSString *file = [dir stringByAppendingPathComponent:@"main.tex"];
+    [@"x" writeToFile:file atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    [TMRecentFiles noteSessionFolderURL:[NSURL fileURLWithPath:dir] fileURL:[NSURL fileURLWithPath:file] selection:42];
+    TM_ASSERT_EQ_STR([TMRecentFiles sessionFolderURL].URLByStandardizingPath.path, [NSURL fileURLWithPath:dir].URLByStandardizingPath.path);
+    TM_ASSERT_EQ_STR([TMRecentFiles sessionFileURL].lastPathComponent, @"main.tex");
+    TM_ASSERT_EQ_INT([TMRecentFiles sessionSelection], 42);
+
+    // 文件夹当文件用、文件被删：都视为不存在
+    [TMRecentFiles noteSessionFolderURL:[NSURL fileURLWithPath:file] fileURL:[NSURL fileURLWithPath:file] selection:0];
+    TM_ASSERT_NIL([TMRecentFiles sessionFolderURL]);
+    [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
+    TM_ASSERT_NIL([TMRecentFiles sessionFileURL]);
+
+    [TMRecentFiles noteSessionFolderURL:[NSURL fileURLWithPath:@"/tmp"] fileURL:nil selection:3];
+    [TMRecentFiles clear];
+    TM_ASSERT_NIL([TMRecentFiles sessionFolderURL]);
+    TM_ASSERT_EQ_INT([TMRecentFiles sessionSelection], 0);
+}
+
 TM_TEST(test_compiler_arguments_include_shell_escape_and_extras_before_filename) {
     NSArray *args = [TMCompiler argumentsForEngineName:@"xelatex" useLatexmk:YES outputDir:@"/w" auxDir:nil fileName:@"m.tex"
                                             shellEscape:YES extraArguments:@[@"-outdir=build", @""]];

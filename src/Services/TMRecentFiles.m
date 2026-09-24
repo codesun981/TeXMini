@@ -58,6 +58,37 @@ static const NSUInteger kTMRecentMax = 10;
 + (void)clear {
     [self store:@[] forKey:kTMRecentFilesKey];
     [self store:@[] forKey:kTMRecentFoldersKey];
+    [self noteSessionFolderURL:nil fileURL:nil selection:0];
+}
+
+#pragma mark - 上次会话
+
+static NSString *const kTMSessionFolderKey = @"TMSessionFolder";
+static NSString *const kTMSessionFileKey = @"TMSessionFile";
+static NSString *const kTMSessionSelectionKey = @"TMSessionSelection";
+
++ (void)noteSessionFolderURL:(nullable NSURL *)folder fileURL:(nullable NSURL *)file selection:(NSUInteger)selection {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    NSString *folderPath = folder.URLByStandardizingPath.path;
+    NSString *filePath = file.URLByStandardizingPath.path;
+    if (folderPath.length) [d setObject:folderPath forKey:kTMSessionFolderKey]; else [d removeObjectForKey:kTMSessionFolderKey];
+    if (filePath.length) [d setObject:filePath forKey:kTMSessionFileKey]; else [d removeObjectForKey:kTMSessionFileKey];
+    [d setInteger:(NSInteger)selection forKey:kTMSessionSelectionKey];
+}
+
++ (nullable NSURL *)existingURLForKey:(NSString *)key directory:(BOOL)wantDirectory {
+    NSString *path = [[NSUserDefaults standardUserDefaults] stringForKey:key];
+    BOOL isDir = NO;
+    if (path.length == 0 || ![[NSFileManager defaultManager] fileExistsAtPath:path isDirectory:&isDir] || isDir != wantDirectory) return nil;
+    return [NSURL fileURLWithPath:path isDirectory:wantDirectory];
+}
+
++ (nullable NSURL *)sessionFolderURL { return [self existingURLForKey:kTMSessionFolderKey directory:YES]; }
++ (nullable NSURL *)sessionFileURL { return [self existingURLForKey:kTMSessionFileKey directory:NO]; }
+
++ (NSUInteger)sessionSelection {
+    NSInteger loc = [[NSUserDefaults standardUserDefaults] integerForKey:kTMSessionSelectionKey];
+    return loc > 0 ? (NSUInteger)loc : 0;
 }
 
 @end

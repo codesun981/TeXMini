@@ -19,9 +19,10 @@
 - (void)applicationDidFinishLaunching:(NSNotification *)aNotification {
     [self setupMainMenu];
 
+    // 双击 .tex 启动时 application:openFile: 已先建好窗口；否则恢复上次的项目或显示首页
     if (!self.mainWindowController) {
-        TMDocument *initialDoc = [TMDocument documentWithDefaultTemplate];
-        self.mainWindowController = [[TMMainWindowController alloc] initWithDocument:initialDoc];
+        self.mainWindowController = [[TMMainWindowController alloc] initWithDocument:[TMDocument documentWithBlankTemplate]];
+        [self.mainWindowController restoreLastSessionOrShowWelcome];
     }
     [self.mainWindowController showWindow:nil];
     [self.mainWindowController.window makeKeyAndOrderFront:nil];
@@ -50,6 +51,7 @@
     if (self.mainWindowController && ![self.mainWindowController confirmDiscardChangesWithTitle:@"退出前是否保存更改？"]) {
         return NSTerminateCancel;
     }
+    [self.mainWindowController saveSessionState];
     return NSTerminateNow;
 }
 
@@ -77,6 +79,8 @@
     // 2. 文件菜单 (File)
     NSMenuItem *fileMenuItem = [[NSMenuItem alloc] init];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"文件"];
+    [fileMenu addItemWithTitle:@"首页" action:@selector(showWelcomeAction:) keyEquivalent:@""];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"新建" action:@selector(newDocumentAction:) keyEquivalent:@"n"];
     [fileMenu addItemWithTitle:@"打开…" action:@selector(openDocumentAction:) keyEquivalent:@"o"];
     [fileMenu addItemWithTitle:@"打开文件夹…" action:@selector(openFolderAction:) keyEquivalent:@"O"];
@@ -94,7 +98,8 @@
     [fileMenu addItemWithTitle:@"在访达中显示 PDF" action:@selector(revealPDFAction:) keyEquivalent:@"R"];
     [fileMenu addItemWithTitle:@"打印 PDF…" action:@selector(printPDFAction:) keyEquivalent:@"p"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(performClose:) keyEquivalent:@"w"];
+    // 标题随状态变：项目里是“关闭项目”（回到首页），首页上是“关闭窗口”
+    [fileMenu addItemWithTitle:@"关闭窗口" action:@selector(closeKeyWindowAction:) keyEquivalent:@"w"];
     fileMenuItem.submenu = fileMenu;
     [mainMenu addItem:fileMenuItem];
 
@@ -271,6 +276,16 @@
     [self.mainWindowController promptGotoLine];
 }
 
+/// ⌘W 作用于当前窗口：偏好设置等窗口照常关闭；主窗口走两段式关闭（见 windowShouldClose:）。
+- (void)closeKeyWindowAction:(id)sender {
+    [(NSApp.keyWindow ?: NSApp.mainWindow) performClose:sender];
+}
+
+- (void)showWelcomeAction:(id)sender {
+    [self.mainWindowController showWelcome];
+    [self.mainWindowController.window makeKeyAndOrderFront:nil];
+}
+
 - (void)toggleAutoSaveAction:(id)sender {
     [TMPreferences shared].autoSaveEnabled = ![TMPreferences shared].autoSaveEnabled;
 }
@@ -334,6 +349,12 @@
     SEL action = menuItem.action;
     if (action == @selector(cancelCompileAction:)) {
         return [self.mainWindowController isCompiling];
+    }
+    if (action == @selector(closeKeyWindowAction:)) {
+        NSWindow *w = NSApp.keyWindow ?: NSApp.mainWindow;
+        BOOL closesProject = w && w == self.mainWindowController.window && ![self.mainWindowController isShowingWelcome];
+        menuItem.title = closesProject ? @"关闭项目" : @"关闭窗口";
+        return w != nil;
     }
     if (action == @selector(toggleAutoSaveAction:)) {
         menuItem.state = [TMPreferences shared].autoSaveEnabled ? NSControlStateValueOn : NSControlStateValueOff;

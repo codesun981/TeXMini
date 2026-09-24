@@ -21,6 +21,10 @@ extern NSNotificationName const TMPreferencesDidChangeNotification;
 /// 停止输入 1 秒后、窗口失去焦点时保存 .tex（不编译）；切换 / 关闭文件时不再询问。默认 YES。
 @property (nonatomic, assign) BOOL autoSaveEnabled;
 
+// 启动
+/// 启动时打开上次的项目与文件；关闭则显示首页。默认 YES。
+@property (nonatomic, assign) BOOL restoreLastSession;
+
 // 编译
 @property (nonatomic, assign) NSInteger defaultEngine;     // TMTeXEngine 的原始值，默认 0（latexmk 自动）
 @property (nonatomic, assign) BOOL autoCompileEnabled;     // 默认 NO

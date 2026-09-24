@@ -17,6 +17,7 @@
 #import "TMFontSettings.h"
 #import "TMFontCatalog.h"
 #import "TMDocumentFontView.h"
+#import "TMWelcomeView.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
@@ -59,7 +60,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 - (void)mouseDragged:(NSEvent *)event {}
 @end
 
-@interface TMMainWindowController () <NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate>
+@interface TMMainWindowController () <TMWelcomeViewDelegate, NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate>
 
 // 外层：系统 NSSplitViewController 负责侧边栏折叠、分割线隐藏、宽度记忆
 @property (nonatomic, strong) NSSplitViewController *mainSplitViewController;
@@ -84,6 +85,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, assign) NSInteger pdfSearchIndex;
 @property (nonatomic, strong) TMStatusBarView *statusBar;
 @property (nonatomic, strong) TMLogDrawerView *logDrawer;
+@property (nonatomic, strong) TMWelcomeView *welcomeView;
 
 @property (nonatomic, assign) NSInteger currentCursorLine;
 @property (nonatomic, assign) NSInteger currentCursorCol;
@@ -146,16 +148,6 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 
         // 窗口位置/大小交给系统自动保存
         [window setFrameAutosaveName:@"TMMainWindow"];
-
-        // 首次打开未命名欢迎模板时，暂存到临时目录并触发初次编译，让用户第一眼看到分栏预览。
-        // 注意用 saveScratchToURL: 而非 saveToURL:，否则之后 ⌘S 会静默写回 /tmp。
-        if (!_documentModel.fileURL) {
-            NSURL *tmpURL = [self scratchFileURLNamed:@"TeXMini_Welcome.tex"];
-            [_documentModel saveScratchToURL:tmpURL error:nil];
-            dispatch_async(dispatch_get_main_queue(), ^{
-                [self compileCurrentDocument];
-            });
-        }
     }
     return self;
 }
@@ -310,6 +302,13 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
     NSView *mainSplitView = _mainSplitViewController.view;
     [contentView addSubview:mainSplitView];
 
+    // 1.2 首页：与主分栏同位置，默认隐藏
+    _welcomeView = [[TMWelcomeView alloc] initWithFrame:NSZeroRect];
+    _welcomeView.delegate = self;
+    _welcomeView.hidden = YES;
+    _welcomeView.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:_welcomeView positioned:NSWindowAbove relativeTo:mainSplitView];
+
     // 2. 抽屉式日志视图
     _logDrawer = [[TMLogDrawerView alloc] init];
     _logDrawer.delegate = self;
@@ -328,6 +327,11 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
         [mainSplitView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
         [mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
         [mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
+
+        [_welcomeView.topAnchor constraintEqualToAnchor:mainSplitView.topAnchor],
+        [_welcomeView.leadingAnchor constraintEqualToAnchor:mainSplitView.leadingAnchor],
+        [_welcomeView.trailingAnchor constraintEqualToAnchor:mainSplitView.trailingAnchor],
+        [_welcomeView.bottomAnchor constraintEqualToAnchor:mainSplitView.bottomAnchor],
 
         [_logDrawer.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
         [_logDrawer.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
@@ -672,6 +676,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self refreshIssueMarks];
         // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
         [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
+        [self hideWelcome];
+        [self saveSessionState];
     }
 }
 
@@ -819,6 +825,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
     [self setProjectRootURL:folderURL reload:YES];
     [TMRecentFiles noteFolderURL:folderURL];
+    [self hideWelcome];
     self.outlineSidebarView.mode = TMSidebarModeFiles;
     if (self.sidebarItem.isCollapsed) [self toggleOutlineSidebar];
 
@@ -827,6 +834,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self openDocumentAtURL:main];
     } else {
         [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已打开文件夹 %@，未找到含 \\documentclass 的主文件", folderURL.lastPathComponent]];
+        // 编辑器里还是之前的文件，它不属于这个项目，别记进会话
+        [TMRecentFiles noteSessionFolderURL:folderURL fileURL:nil selection:0];
     }
 }
 
@@ -1063,14 +1072,21 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 #pragma mark - NSWindowDelegate
 
+/// 两段式关闭：项目里点关闭 → 回到首页（方便换项目）；首页上再点关闭才真正关窗退出。
 - (BOOL)windowShouldClose:(NSWindow *)sender {
-    if (![self confirmDiscardChangesWithTitle:@"关闭窗口前是否保存更改？"]) return NO;
+    BOOL onWelcome = [self isShowingWelcome];
+    if (![self confirmDiscardChangesWithTitle:onWelcome ? @"关闭窗口前是否保存更改？" : @"关闭项目前是否保存更改？"]) return NO;
+    if (!onWelcome) {
+        [self closeProjectAndShowWelcome];
+        return NO;
+    }
     // 用户已决定（保存或放弃），避免随后的 applicationShouldTerminate 再问一次
     self.documentModel.isDirty = NO;
     return YES;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    [self saveSessionState];
     if (!self.scratchDirectoryURL) return;
     // 正在编译的是本窗口的暂存文档：先停掉，免得编译器往被删的目录里写
     if (self.documentModel.isScratch && [self isCompiling]) [self cancelCompilation];
@@ -1080,6 +1096,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 #pragma mark - 编译动作与回调
 
 - (void)compileCurrentDocument {
+    if ([self isShowingWelcome]) return;
     self.documentModel.content = self.editorTextView.string;
 
     // 如果还没有指定文件路径，暂存到临时工作空间，省去弹窗干扰
@@ -1496,6 +1513,102 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     // 插在光标之前，把光标挪回原来的位置（仍在 \caption{ 里）
     [self.editorTextView setSelectedRange:NSMakeRange(sel.location + (loc <= sel.location ? line.length : 0), 0)];
     [self.editorTextView scrollRangeToVisible:self.editorTextView.selectedRange];
+}
+
+#pragma mark - 首页与上次会话
+
+- (BOOL)isShowingWelcome {
+    return !self.welcomeView.hidden;
+}
+
+- (void)showWelcome {
+    self.welcomeView.showsDismissButton = self.documentModel.fileURL != nil && !self.documentModel.isScratch;
+    [self.welcomeView reload];
+    self.welcomeView.hidden = NO;
+    [self.window makeFirstResponder:self.welcomeView];
+    self.window.title = @"TeXMini";
+    self.window.representedURL = nil;
+}
+
+- (void)hideWelcome {
+    if (![self isShowingWelcome]) return;
+    self.welcomeView.hidden = YES;
+    [self refreshWindowTitle];
+    [self.window makeFirstResponder:self.editorTextView];
+}
+
+/// 记下当前项目文件夹、文件与光标；没有正式文件也没有项目文件夹时不覆盖上次的记录。
+- (void)saveSessionState {
+    NSURL *file = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
+    if (!file && !self.projectRootURL) return;
+    [TMRecentFiles noteSessionFolderURL:self.projectRootURL fileURL:file selection:self.editorTextView.selectedRange.location];
+}
+
+- (void)restoreLastSessionOrShowWelcome {
+    BOOL restore = [TMPreferences shared].restoreLastSession;
+    NSURL *file = restore ? [TMRecentFiles sessionFileURL] : nil;
+    NSURL *folder = restore ? [TMRecentFiles sessionFolderURL] : nil;
+    NSUInteger selection = [TMRecentFiles sessionSelection];
+
+    TMDocument *doc = (file && [TMProject isEditableFileURL:file]) ? [TMDocument documentWithContentsOfURL:file error:nil] : nil;
+    if (doc) {
+        // 文件在上次的项目文件夹里：文件浏览器的根也回到那个文件夹，而不是文件所在的子目录
+        if (folder && [file.URLByStandardizingPath.path hasPrefix:[folder.URLByStandardizingPath.path stringByAppendingString:@"/"]]) {
+            [self setProjectRootURL:folder reload:YES];
+        }
+        self.documentModel = doc;
+        [self loadDocumentIntoEditor];
+        [TMRecentFiles noteFileURL:file];
+        NSRange sel = NSMakeRange(MIN(selection, self.editorTextView.string.length), 0);
+        [self.editorTextView setSelectedRange:sel];
+        // 等窗口第一次布局完再滚动，否则算不出目标位置
+        dispatch_async(dispatch_get_main_queue(), ^{ [self.editorTextView scrollRangeToVisible:sel]; });
+        return;
+    }
+    if (folder) {
+        [self openFolderAtURL:folder];
+        return;
+    }
+    [self showWelcome];
+}
+
+- (void)closeProjectAndShowWelcome {
+    // 先记下会话：关掉项目后在首页退出，下次启动仍回到这个项目
+    [self saveSessionState];
+    if ([self isCompiling]) [self cancelCompilation];
+    [self.autoSaveTimer invalidate];
+    self.autoSaveTimer = nil;
+    [self.autoCompileTimer invalidate];
+    self.autoCompileTimer = nil;
+    self.needsCompileAfterCurrent = NO;
+    [self.fileWatcher stop];
+    self.fileWatcher = nil;
+    [self removeScratchDirectory];
+
+    [self setProjectRootURL:nil reload:YES];
+    self.documentModel = [TMDocument documentWithBlankTemplate];
+    [self loadDocumentIntoEditor];
+    [self.logDrawer clearLog];
+    self.lastIssues = @[];
+    [self.logDrawer setIssues:@[]];
+    [self refreshIssueMarks];
+    [self hidePDFSearchBar];
+    [self showPDFIfExistsAtURL:nil];
+    [self.statusBar showReadyState];
+    [self showWelcome];
+}
+
+#pragma mark - TMWelcomeViewDelegate
+
+- (void)welcomeViewDidRequestNewDocument:(TMWelcomeView *)view { [self showTemplateMenuAction:nil]; }
+- (void)welcomeViewDidRequestOpenFile:(TMWelcomeView *)view { [self openFileAction:nil]; }
+- (void)welcomeViewDidRequestOpenFolder:(TMWelcomeView *)view { [self openFolderAction:nil]; }
+- (void)welcomeViewDidRequestDismiss:(TMWelcomeView *)view { [self hideWelcome]; }
+
+- (void)welcomeView:(TMWelcomeView *)view didSelectRecentURL:(NSURL *)url {
+    [self openDocumentAtURL:url];
+    // 打开失败（文件已不在）时列表要刷新
+    if ([self isShowingWelcome]) [view reload];
 }
 
 #pragma mark - 文档字体
@@ -2159,6 +2272,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (BOOL)validateToolbarItem:(NSToolbarItem *)item {
+    // 首页上只留新建 / 模板 / 打开
+    if ([self isShowingWelcome]) {
+        return item.action == @selector(newDocumentAction:) || item.action == @selector(showTemplateMenuAction:) ||
+               item.action == @selector(openFileAction:);
+    }
     if (item.action == @selector(exportPDFToolbarAction:)) {
         return self.currentPDFURL != nil;
     }

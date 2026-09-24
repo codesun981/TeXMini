@@ -58,6 +58,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)increaseEditorFontSize;
 - (void)decreaseEditorFontSize;
 - (void)resetEditorFontSize;
+/// 启动时调用：按偏好恢复上次的项目与文件（含光标位置）；没有可恢复的就显示首页。
+- (void)restoreLastSessionOrShowWelcome;
+/// 文件 › 首页：盖在内容区上的新建 / 打开 / 最近列表；打开任何文档后自动收起。
+- (void)showWelcome;
+/// 首页是否正盖在内容区上。
+- (BOOL)isShowingWelcome;
+/// 记下当前项目文件夹、文件与光标位置，供下次启动恢复。
+- (void)saveSessionState;
 /// 编辑 › 文档字体…：选择英文 / 中文字体与字号，写入主文件导言区。
 - (void)showDocumentFontsSheet;
 /// 从 TMPreferences 重新应用全部偏好（字体、换行、引擎、编译参数、自动编译）。
