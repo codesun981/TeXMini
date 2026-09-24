@@ -18,6 +18,8 @@ extern NSNotificationName const TMPreferencesDidChangeNotification;
 @property (nonatomic, assign) CGFloat editorFontSize;      // 9–30，默认 13.5
 @property (nonatomic, assign) BOOL softWrapEnabled;        // 默认 YES
 @property (nonatomic, assign) BOOL highlightsCurrentLine;  // 默认 YES
+/// 停止输入 1 秒后、窗口失去焦点时保存 .tex（不编译）；切换 / 关闭文件时不再询问。默认 YES。
+@property (nonatomic, assign) BOOL autoSaveEnabled;
 
 // 编译
 @property (nonatomic, assign) NSInteger defaultEngine;     // TMTeXEngine 的原始值，默认 0（latexmk 自动）

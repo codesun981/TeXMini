@@ -88,6 +88,7 @@
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"保存" action:@selector(saveDocumentAction:) keyEquivalent:@"s"];
     [fileMenu addItemWithTitle:@"另存为…" action:@selector(saveDocumentAsAction:) keyEquivalent:@"S"];
+    [fileMenu addItemWithTitle:@"自动保存" action:@selector(toggleAutoSaveAction:) keyEquivalent:@""];
     // ⌘E 已被“使用所选内容查找”占用（编辑器有焦点时会被抢走），导出改用 ⇧⌘E
     [fileMenu addItemWithTitle:@"导出 PDF…" action:@selector(exportPDFAction:) keyEquivalent:@"E"];
     [fileMenu addItemWithTitle:@"在访达中显示 PDF" action:@selector(revealPDFAction:) keyEquivalent:@"R"];
@@ -270,6 +271,10 @@
     [self.mainWindowController promptGotoLine];
 }
 
+- (void)toggleAutoSaveAction:(id)sender {
+    [TMPreferences shared].autoSaveEnabled = ![TMPreferences shared].autoSaveEnabled;
+}
+
 - (void)documentFontsAction:(id)sender {
     [self.mainWindowController showDocumentFontsSheet];
 }
@@ -329,6 +334,10 @@
     SEL action = menuItem.action;
     if (action == @selector(cancelCompileAction:)) {
         return [self.mainWindowController isCompiling];
+    }
+    if (action == @selector(toggleAutoSaveAction:)) {
+        menuItem.state = [TMPreferences shared].autoSaveEnabled ? NSControlStateValueOn : NSControlStateValueOff;
+        return YES;
     }
     if (action == @selector(toggleAutoCompileAction:)) {
         menuItem.state = self.mainWindowController.autoCompileEnabled ? NSControlStateValueOn : NSControlStateValueOff;

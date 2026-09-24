@@ -89,6 +89,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, assign) NSInteger currentCursorCol;
 @property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
 @property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
+@property (nonatomic, strong, nullable) NSTimer *autoSaveTimer;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
@@ -797,6 +798,13 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     [self.completionProvider invalidate];
 }
 
+- (void)windowDidResignKey:(NSNotification *)notification {
+    // 切到别的程序 / 窗口时立刻落盘，不等计时器
+    [self.autoSaveTimer invalidate];
+    self.autoSaveTimer = nil;
+    [self autoSaveIfNeeded];
+}
+
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     // 切回来时立刻检查一次；vnode 事件偶尔会丢（例如网络盘）
     [self checkForExternalModification];
@@ -909,6 +917,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 /// 在丢弃当前文档前询问用户。返回 YES 表示可以继续（已保存或用户选择不保存）。
 - (BOOL)confirmDiscardChangesWithTitle:(NSString *)title {
     if (![self hasUnsavedChanges]) return YES;
+    // 开着自动保存就直接存，不打断；暂存 / 未命名文档或保存失败才问
+    if ([TMPreferences shared].autoSaveEnabled && [self autoSaveIfNeeded]) return YES;
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = title;
@@ -1152,6 +1162,54 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     return [TMCompiler sharedCompiler].isCompiling;
 }
 
+#pragma mark - 自动保存
+
+- (void)scheduleAutoSave {
+    if (![TMPreferences shared].autoSaveEnabled) return;
+    [self.autoSaveTimer invalidate];
+    self.autoSaveTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+                                                          target:self
+                                                        selector:@selector(autoSaveTimerFired)
+                                                        userInfo:nil
+                                                         repeats:NO];
+}
+
+- (void)autoSaveTimerFired {
+    self.autoSaveTimer = nil;
+    [self autoSaveIfNeeded];
+}
+
+/// 只保存 .tex，不编译。未命名 / 暂存文档不自动保存；磁盘上的文件被删或被别的程序改过时不覆盖，
+/// 交给外部修改提示。返回 YES 表示现在已没有未保存的更改。
+- (BOOL)autoSaveIfNeeded {
+    if (!self.documentModel.isDirty) return YES;
+    if (![TMPreferences shared].autoSaveEnabled) return NO;
+    if (!self.documentModel.fileURL || self.documentModel.isScratch || self.isShowingExternalChangeAlert) return NO;
+    // 输入法还在组字（拼音未上屏）：别把半截拼音写进文件，稍后再存
+    if (self.editorTextView.hasMarkedText) {
+        [self scheduleAutoSave];
+        return NO;
+    }
+
+    [self.documentModel.fileURL removeCachedResourceValueForKey:NSURLContentModificationDateKey];
+    NSDate *onDisk = [self modificationDateOfCurrentFile];
+    if (!onDisk) return NO;
+    if (self.knownModificationDate && [onDisk compare:self.knownModificationDate] == NSOrderedDescending) {
+        [self checkForExternalModification];
+        return NO;
+    }
+
+    self.documentModel.content = self.editorTextView.string;
+    NSError *err = nil;
+    if (![self.documentModel saveCurrentFileWithError:&err]) {
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"自动保存失败：%@", err.localizedDescription ?: @"未知错误"]];
+        return NO;
+    }
+    [self didWriteCurrentFile];
+    [self refreshWindowTitle];
+    return YES;
+}
+
 #pragma mark - 自动编译
 
 - (void)setAutoCompileEnabled:(BOOL)enabled {
@@ -1316,6 +1374,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         self.window.documentEdited = YES;
     }
     [self scheduleOutlineUpdateImmediate:NO];
+    [self scheduleAutoSave];
     [self scheduleAutoCompile];
 }
 

@@ -6,6 +6,7 @@ static NSString *const kFontName = @"TMEditorFontName";
 static NSString *const kFontSize = @"TMEditorFontSize";
 static NSString *const kSoftWrap = @"TMSoftWrap";
 static NSString *const kCurrentLine = @"TMHighlightCurrentLine";
+static NSString *const kAutoSave = @"TMAutoSave";
 static NSString *const kEngine = @"TMEngine";
 static NSString *const kAutoCompile = @"TMAutoCompile";
 static NSString *const kShellEscape = @"TMShellEscape";
@@ -28,6 +29,7 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
         kFontSize: @13.5,
         kSoftWrap: @YES,
         kCurrentLine: @YES,
+        kAutoSave: @YES,
         kEngine: @0,
         kAutoCompile: @NO,
         kShellEscape: @NO,
@@ -70,6 +72,9 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
 
 - (BOOL)highlightsCurrentLine { return [self.defaults boolForKey:kCurrentLine]; }
 - (void)setHighlightsCurrentLine:(BOOL)v { [self.defaults setBool:v forKey:kCurrentLine]; [self didChange]; }
+
+- (BOOL)autoSaveEnabled { return [self.defaults boolForKey:kAutoSave]; }
+- (void)setAutoSaveEnabled:(BOOL)v { [self.defaults setBool:v forKey:kAutoSave]; [self didChange]; }
 
 #pragma mark - 编译
 
