@@ -6,6 +6,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @protocol TMWelcomeViewDelegate <NSObject>
 - (void)welcomeViewDidRequestNewDocument:(TMWelcomeView *)view;
+/// 点击指定模板新建：0: 学术论文, 1: 中文报告, 2: 空白文档
+- (void)welcomeView:(TMWelcomeView *)view didSelectTemplateAtIndex:(NSInteger)index;
+/// “从模板开始”：弹出模板选择。
+- (void)welcomeViewDidRequestTemplatePicker:(TMWelcomeView *)view;
 - (void)welcomeViewDidRequestOpenFile:(TMWelcomeView *)view;
 - (void)welcomeViewDidRequestOpenFolder:(TMWelcomeView *)view;
 /// 最近列表里的文件或文件夹。

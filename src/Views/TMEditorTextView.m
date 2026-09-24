@@ -12,10 +12,14 @@ static NSString *const kTMIndentUnit = @"  ";
     TMCompletionPopup *_completionPopup;
     /// 正在把候选写进正文，这期间的文字 / 选区变化不要再刷新浮窗
     BOOL _acceptingCompletion;
+    /// 待高亮的范围（合并同一轮 runloop 内的多次编辑）；location == NSNotFound 表示没有。
+    NSRange _pendingHighlightRange;
+    BOOL _highlightScheduled;
 }
 
 - (void)setupEditor {
     _softWrapEnabled = YES;
+    _pendingHighlightRange = NSMakeRange(NSNotFound, 0);
     _highlightsCurrentLine = YES;
     self.allowsUndo = YES;
     self.automaticQuoteSubstitutionEnabled = NO;
@@ -47,6 +51,8 @@ static NSString *const kTMIndentUnit = @"  ";
 }
 
 - (void)rehighlightAll {
+    // 整篇已同步高亮，之前排队的局部高亮不必再做
+    _pendingHighlightRange = NSMakeRange(NSNotFound, 0);
     if (self.textStorage.length > 0) {
         [TMLaTeXHighlighter highlightTextStorage:self.textStorage inRange:NSMakeRange(0, self.textStorage.length)];
     }
@@ -244,11 +250,40 @@ static unichar TMMatchingBracket(unichar c) {
 - (void)textStorageDidProcessEditingNotification:(NSNotification *)note {
     NSTextStorage *storage = (NSTextStorage *)note.object;
     if (storage.editedMask & NSTextStorageEditedCharacters) {
-        NSRange editedRange = storage.editedRange;
+        NSRange edited = storage.editedRange;
+        NSRange pending = _pendingHighlightRange;
+        if (_highlightScheduled && pending.location != NSNotFound) {
+            // 把上一次的待高亮范围换算到这次编辑后的坐标，再与本次合并
+            NSInteger delta = storage.changeInLength;
+            NSUInteger oldEditEnd = NSMaxRange(edited) - delta;
+            if (pending.location >= oldEditEnd) {
+                pending.location += delta;
+            } else if (NSMaxRange(pending) > edited.location) {
+                pending.length = (NSUInteger)MAX((NSInteger)pending.length + delta, 0);
+            }
+            _pendingHighlightRange = NSUnionRange(pending, edited);
+        } else {
+            _pendingHighlightRange = edited;
+        }
+        if (_highlightScheduled) return;
+        _highlightScheduled = YES;
+        __weak typeof(self) weakSelf = self;
         dispatch_async(dispatch_get_main_queue(), ^{
-            [TMLaTeXHighlighter highlightTextStorage:storage inRange:editedRange];
+            [weakSelf flushPendingHighlight];
         });
     }
+}
+
+- (void)flushPendingHighlight {
+    _highlightScheduled = NO;
+    NSRange range = _pendingHighlightRange;
+    _pendingHighlightRange = NSMakeRange(NSNotFound, 0);
+    if (range.location == NSNotFound) return;
+    // 手动夹到正文范围内（NSIntersectionRange 对空范围会返回 {0,0}，删除时会高亮错位置）
+    NSUInteger length = self.textStorage.length;
+    NSUInteger location = MIN(range.location, length);
+    range = NSMakeRange(location, MIN(range.length, length - location));
+    [TMLaTeXHighlighter highlightTextStorage:self.textStorage inRange:range];
 }
 
 #pragma mark - 可撤销的整行替换

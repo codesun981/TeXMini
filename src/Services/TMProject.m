@@ -123,6 +123,24 @@
     return result;
 }
 
+/// 读取候选 .tex 的内容；按修改时间缓存，文件没变就不重复读盘（主文件推断每次加载 / 编译都会跑）。
++ (nullable NSString *)cachedContentsOfTeXFileURL:(NSURL *)url {
+    static NSCache<NSString *, NSArray *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [[NSCache alloc] init];
+        cache.countLimit = 256;
+    });
+    NSDate *modified = nil;
+    [url removeCachedResourceValueForKey:NSURLContentModificationDateKey];
+    [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
+    NSArray *entry = [cache objectForKey:url.path];
+    if (modified && entry && [entry[0] isEqualToDate:modified]) return entry[1];
+    NSString *content = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
+    if (modified && content) [cache setObject:@[modified, content] forKey:url.path];
+    return content;
+}
+
 + (nullable NSURL *)mainFileURLForDocumentURL:(NSURL *)documentURL content:(NSString *)content {
     if (!documentURL) return nil;
     content = content ?: @"";
@@ -140,7 +158,7 @@
     NSMutableArray<NSURL *> *candidates = [NSMutableArray array];
     for (NSURL *u in [self topLevelTeXFilesInDirectory:dir]) {
         if ([u.URLByStandardizingPath isEqual:documentURL.URLByStandardizingPath]) continue;
-        NSString *c = [NSString stringWithContentsOfURL:u encoding:NSUTF8StringEncoding error:nil];
+        NSString *c = [self cachedContentsOfTeXFileURL:u];
         if (![self contentDeclaresDocumentClass:c]) continue;
         if ([[self referencedBaseNamesInContent:c] containsObject:myBase]) return u;
         [candidates addObject:u];
@@ -151,7 +169,7 @@
         if (parent && ![parent isEqual:dir]) {
             NSString *relBase = [NSString stringWithFormat:@"%@/%@", dir.lastPathComponent, myBase];
             for (NSURL *u in [self topLevelTeXFilesInDirectory:parent]) {
-                NSString *c = [NSString stringWithContentsOfURL:u encoding:NSUTF8StringEncoding error:nil];
+                NSString *c = [self cachedContentsOfTeXFileURL:u];
                 if (![self contentDeclaresDocumentClass:c]) continue;
                 NSSet *refs = [self referencedBaseNamesInContent:c];
                 if ([refs containsObject:myBase] || [refs containsObject:relBase]) return u;
@@ -168,7 +186,7 @@
     NSMutableDictionary<NSURL *, NSNumber *> *refCounts = [NSMutableDictionary dictionary];
 
     for (NSURL *u in [self topLevelTeXFilesInDirectory:directoryURL]) {
-        NSString *c = [NSString stringWithContentsOfURL:u encoding:NSUTF8StringEncoding error:nil];
+        NSString *c = [self cachedContentsOfTeXFileURL:u];
         if (![self contentDeclaresDocumentClass:c]) continue;
         [candidates addObject:u];
         refCounts[u] = @([self referencedBaseNamesInContent:c].count);

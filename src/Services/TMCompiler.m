@@ -1,12 +1,63 @@
 #import "TMCompiler.h"
 #import "TMMagicComments.h"
 #import <CommonCrypto/CommonDigest.h>
+#import <libproc.h>
+#import <signal.h>
 
 @interface TMCompiler ()
 @property (nonatomic, assign) BOOL isCompiling;
 @property (nonatomic, assign) BOOL wasCancelled;
 @property (nonatomic, strong) NSTask *currentTask;
 @end
+
+/// 解码 data 中完整的 UTF-8 前缀并从 data 中移除；末尾被截断的多字节字符留在 data 里。
+/// 整块都不是合法 UTF-8 时按 Latin-1 解码（老式 8 位编码的日志）。
+static NSString *TMDecodeCompleteUTF8Prefix(NSMutableData *data) {
+    const uint8_t *bytes = data.bytes;
+    NSUInteger length = data.length;
+    NSUInteger keep = 0;
+    // 从末尾往回找最后一个起始字节，判断它的多字节序列是否完整
+    for (NSUInteger i = 1; i <= MIN((NSUInteger)3, length); i++) {
+        uint8_t b = bytes[length - i];
+        if ((b & 0xC0) == 0x80) continue;   // 续字节
+        NSUInteger need = (b & 0xE0) == 0xC0 ? 2 : (b & 0xF0) == 0xE0 ? 3 : (b & 0xF8) == 0xF0 ? 4 : 1;
+        if (need > i) keep = i;
+        break;
+    }
+    NSUInteger usable = length - keep;
+    if (usable == 0) return nil;
+    NSData *head = [data subdataWithRange:NSMakeRange(0, usable)];
+    NSString *text = [[NSString alloc] initWithData:head encoding:NSUTF8StringEncoding]
+                  ?: [[NSString alloc] initWithData:head encoding:NSISOLatin1StringEncoding];
+    [data replaceBytesInRange:NSMakeRange(0, usable) withBytes:NULL length:0];
+    return text;
+}
+
+/// 去掉每行第一个未转义 % 之后的内容（\% 是字面百分号，保留）。
+static NSString *TMStripTeXComments(NSString *content) {
+    if (![content containsString:@"%"]) return content;
+    NSMutableString *result = [NSMutableString stringWithCapacity:content.length];
+    [content enumerateLinesUsingBlock:^(NSString *line, BOOL *stop) {
+        NSUInteger cut = line.length;
+        for (NSUInteger i = 0; i < line.length; i++) {
+            unichar c = [line characterAtIndex:i];
+            if (c == '\\') { i++; continue; }
+            if (c == '%') { cut = i; break; }
+        }
+        [result appendString:[line substringToIndex:cut]];
+        [result appendString:@"\n"];
+    }];
+    return result;
+}
+
+/// 先结束子孙进程再结束自身（SIGTERM）。
+static void TMTerminateProcessTree(pid_t pid) {
+    if (pid <= 0) return;
+    pid_t children[256];
+    int count = proc_listchildpids(pid, children, sizeof(children));
+    for (int i = 0; i < count && i < 256; i++) TMTerminateProcessTree(children[i]);
+    kill(pid, SIGTERM);
+}
 
 @implementation TMCompiler
 
@@ -82,6 +133,8 @@
         return program;
     }
     // ctex / xeCJK / fontspec，或直接用了 fontspec 的字体命令（可能经 unicode-math 等间接加载），都需要 XeLaTeX
+    // 先去掉注释：注释掉的 %\usepackage{ctex} 不应让整篇改用更慢的 XeLaTeX
+    content = TMStripTeXComments(content ?: @"");
     BOOL needsXeTeX = [content containsString:@"ctex"] || [content containsString:@"xeCJK"] || [content containsString:@"fontspec"] ||
                       [content containsString:@"\\setmainfont"] || [content containsString:@"\\setCJKmainfont"];
     return needsXeTeX ? @"xelatex" : @"pdflatex";
@@ -142,7 +195,8 @@
 - (void)cancelCompilation {
     if (self.isCompiling && self.currentTask) {
         self.wasCancelled = YES;
-        [self.currentTask terminate];
+        // 只 terminate latexmk 的话，它拉起的 xelatex / bibtex 会变孤儿继续写 aux，连子进程一起结束
+        TMTerminateProcessTree(self.currentTask.processIdentifier);
     }
 }
 
@@ -225,21 +279,7 @@
     NSMutableString *fullOutput = [NSMutableString string];
     NSFileHandle *readHandle = pipe.fileHandleForReading;
 
-    readHandle.readabilityHandler = ^(NSFileHandle *handle) {
-        NSData *data = [handle availableData];
-        if (data.length == 0) return;
-        NSString *chunk = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
-                       ?: [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding];
-        if (!chunk) return;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [fullOutput appendString:chunk];
-            if ([self.delegate respondsToSelector:@selector(compilerDidOutputLog:)]) {
-                [self.delegate compilerDidOutputLog:chunk];
-            }
-        });
-    };
-
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *launchError = nil;
         [task launchAndReturnError:&launchError];
         if (launchError) {
@@ -253,18 +293,46 @@
             return;
         }
 
-        [task waitUntilExit];
-        readHandle.readabilityHandler = nil;
+        // 在后台读管道：末尾不完整的 UTF-8 字节留到下一块再解码，
+        // 日志每 0.15 秒合并推一次主线程（latexmk 多遍输出上万行时不再逐块刷 UI）
+        NSMutableData *pending = [NSMutableData data];
+        NSMutableString *batch = [NSMutableString string];
+        CFAbsoluteTime lastFlush = CFAbsoluteTimeGetCurrent();
+        void (^flush)(void) = ^{
+            if (batch.length == 0) return;
+            NSString *text = [batch copy];
+            [batch setString:@""];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [fullOutput appendString:text];
+                if (self.currentTask == task && [self.delegate respondsToSelector:@selector(compilerDidOutputLog:)]) {
+                    [self.delegate compilerDidOutputLog:text];
+                }
+            });
+        };
+        while (YES) {
+            NSData *data = [readHandle availableData];
+            if (data.length == 0) break;
+            [pending appendData:data];
+            NSString *chunk = TMDecodeCompleteUTF8Prefix(pending);
+            if (chunk) [batch appendString:chunk];
+            if (CFAbsoluteTimeGetCurrent() - lastFlush >= 0.15) {
+                flush();
+                lastFlush = CFAbsoluteTimeGetCurrent();
+            }
+        }
+        if (pending.length > 0) {
+            NSString *tail = [[NSString alloc] initWithData:pending encoding:NSUTF8StringEncoding]
+                          ?: [[NSString alloc] initWithData:pending encoding:NSISOLatin1StringEncoding];
+            if (tail) [batch appendString:tail];
+        }
+        flush();
 
-        NSData *rest = [readHandle readDataToEndOfFile];
-        NSString *restChunk = rest.length > 0 ? [[NSString alloc] initWithData:rest encoding:NSUTF8StringEncoding] : nil;
+        [task waitUntilExit];
 
         int exitCode = task.terminationStatus;
         NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:startTime];
 
         dispatch_async(dispatch_get_main_queue(), ^{
-            if (restChunk) [fullOutput appendString:restChunk];
-
             // 这个回调属于已被取消/替换的旧任务
             if (self.currentTask != task) return;
 

@@ -21,7 +21,7 @@
 
     // 双击 .tex 启动时 application:openFile: 已先建好窗口；否则恢复上次的项目或显示首页
     if (!self.mainWindowController) {
-        self.mainWindowController = [[TMMainWindowController alloc] initWithDocument:[TMDocument documentWithBlankTemplate]];
+        self.mainWindowController = [[TMMainWindowController alloc] initForSessionRestore];
         [self.mainWindowController restoreLastSessionOrShowWelcome];
     }
     [self.mainWindowController showWindow:nil];

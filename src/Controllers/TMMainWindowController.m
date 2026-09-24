@@ -14,9 +14,8 @@
 #import "TMPreferences.h"
 #import "TMLaTeXHighlighter.h"
 #import "TMEditActions.h"
-#import "TMFontSettings.h"
-#import "TMFontCatalog.h"
-#import "TMDocumentFontView.h"
+#import "TMFontFixController.h"
+#import "TMTemplatePicker.h"
 #import "TMWelcomeView.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -60,7 +59,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 - (void)mouseDragged:(NSEvent *)event {}
 @end
 
-@interface TMMainWindowController () <TMWelcomeViewDelegate, NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate>
+@interface TMMainWindowController () <TMWelcomeViewDelegate, NSToolbarDelegate, NSSplitViewDelegate, TMEditorTextViewDelegate, TMPDFViewDelegate, TMCompilerDelegate, TMStatusBarViewDelegate, TMOutlineSidebarViewDelegate, TMFileBrowserViewDelegate, TMLogDrawerViewDelegate, TMFontFixHost>
 
 // 外层：系统 NSSplitViewController 负责侧边栏折叠、分割线隐藏、宽度记忆
 @property (nonatomic, strong) NSSplitViewController *mainSplitViewController;
@@ -92,6 +91,8 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
 @property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
 @property (nonatomic, strong, nullable) NSTimer *autoSaveTimer;
+/// 后台字数统计的代次：只有最新一次的结果写回状态栏。
+@property (nonatomic, assign) NSUInteger wordCountGeneration;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
@@ -101,15 +102,21 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong, nullable) NSDate *knownModificationDate;
 @property (nonatomic, assign) BOOL isShowingExternalChangeAlert;
 @property (nonatomic, strong, nullable) NSURL *scratchDirectoryURL;
-/// 用户拒绝过替换的缺失字体：本次会话不再为它们弹窗（自动编译时不反复打扰）。
-@property (nonatomic, strong) NSMutableSet<NSString *> *declinedFontFixes;
-@property (nonatomic, assign) BOOL isShowingFontFixAlert;
+@property (nonatomic, strong, nullable) TMFontFixController *fontFix;
 
 @end
 
 @implementation TMMainWindowController
 
 - (instancetype)initWithDocument:(TMDocument *)document {
+    return [self initWithDocument:document loadsDocument:YES];
+}
+
+- (instancetype)initForSessionRestore {
+    return [self initWithDocument:[TMDocument documentWithBlankTemplate] loadsDocument:NO];
+}
+
+- (instancetype)initWithDocument:(TMDocument *)document loadsDocument:(BOOL)loadsDocument {
     NSRect screenRect = [NSScreen mainScreen].visibleFrame;
     CGFloat winWidth = MIN(1300.0, screenRect.size.width - 100);
     CGFloat winHeight = MIN(860.0, screenRect.size.height - 100);
@@ -141,7 +148,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
                                                  selector:@selector(preferencesDidChange:)
                                                      name:TMPreferencesDidChangeNotification
                                                    object:nil];
-        [self loadDocumentIntoEditor];
+        if (loadsDocument) [self loadDocumentIntoEditor];
 
         // 侧边栏折叠状态：等 UI 建好后再应用，避免动画
         self.sidebarItem.collapsed = [defaults boolForKey:kTMDefaultsOutlineCollapsed];
@@ -302,13 +309,6 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
     NSView *mainSplitView = _mainSplitViewController.view;
     [contentView addSubview:mainSplitView];
 
-    // 1.2 首页：与主分栏同位置，默认隐藏
-    _welcomeView = [[TMWelcomeView alloc] initWithFrame:NSZeroRect];
-    _welcomeView.delegate = self;
-    _welcomeView.hidden = YES;
-    _welcomeView.translatesAutoresizingMaskIntoConstraints = NO;
-    [contentView addSubview:_welcomeView positioned:NSWindowAbove relativeTo:mainSplitView];
-
     // 2. 抽屉式日志视图
     _logDrawer = [[TMLogDrawerView alloc] init];
     _logDrawer.delegate = self;
@@ -321,6 +321,13 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
     _statusBar.translatesAutoresizingMaskIntoConstraints = NO;
     [contentView addSubview:_statusBar];
 
+    // 1.2 首页：覆盖整个 contentView，处于最顶层，默认隐藏
+    _welcomeView = [[TMWelcomeView alloc] initWithFrame:NSZeroRect];
+    _welcomeView.delegate = self;
+    _welcomeView.hidden = YES;
+    _welcomeView.translatesAutoresizingMaskIntoConstraints = NO;
+    [contentView addSubview:_welcomeView positioned:NSWindowAbove relativeTo:nil];
+
     // 自动布局约束
     [NSLayoutConstraint activateConstraints:@[
         [mainSplitView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
@@ -328,10 +335,10 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
         [mainSplitView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
         [mainSplitView.bottomAnchor constraintEqualToAnchor:_logDrawer.topAnchor],
 
-        [_welcomeView.topAnchor constraintEqualToAnchor:mainSplitView.topAnchor],
-        [_welcomeView.leadingAnchor constraintEqualToAnchor:mainSplitView.leadingAnchor],
-        [_welcomeView.trailingAnchor constraintEqualToAnchor:mainSplitView.trailingAnchor],
-        [_welcomeView.bottomAnchor constraintEqualToAnchor:mainSplitView.bottomAnchor],
+        [_welcomeView.topAnchor constraintEqualToAnchor:contentView.topAnchor],
+        [_welcomeView.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [_welcomeView.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [_welcomeView.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
 
         [_logDrawer.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
         [_logDrawer.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
@@ -568,10 +575,6 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)pdfSearchNextAction:(id)sender { [self stepPDFSearch:1]; }
 - (void)pdfSearchPreviousAction:(id)sender { [self stepPDFSearch:-1]; }
-
-- (BOOL)isPDFInverted {
-    return self.pdfView.inverted;
-}
 
 #pragma mark - 偏好应用
 
@@ -1087,6 +1090,15 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)windowWillClose:(NSNotification *)notification {
     [self saveSessionState];
+    // 计时器强引用 self：关窗时停掉，否则窗口关了还会触发编译 / 保存，控制器也释放不掉。
+    // 不补做待执行的自动保存：用户可能刚在关闭确认里选了“不保存”。
+    for (NSTimer *timer in @[self.autoSaveTimer ?: NSNull.null, self.autoCompileTimer ?: NSNull.null, self.outlineDebounceTimer ?: NSNull.null]) {
+        if ([timer isKindOfClass:[NSTimer class]]) [timer invalidate];
+    }
+    self.autoSaveTimer = nil;
+    self.autoCompileTimer = nil;
+    self.outlineDebounceTimer = nil;
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (!self.scratchDirectoryURL) return;
     // 正在编译的是本窗口的暂存文档：先停掉，免得编译器往被删的目录里写
     if (self.documentModel.isScratch && [self isCompiling]) [self cancelCompilation];
@@ -1103,7 +1115,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if (!self.documentModel.fileURL) {
         NSURL *tmpURL = [self scratchFileURLNamed:@"TeXMini_Document.tex"];
         [self.documentModel saveScratchToURL:tmpURL error:nil];
-    } else {
+    } else if (self.documentModel.isDirty || ![[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.fileURL.path]) {
+        // 没改动就不写盘：原子写会换 inode，白白触发一轮文件监听重挂
         [self.documentModel saveCurrentFileWithError:nil];
         [self didWriteCurrentFile];
         [self refreshWindowTitle];
@@ -1307,7 +1320,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if (!self.logDrawer.isExpanded) {
         [self.logDrawer toggleAnimated];
     }
-    [self offerFontFixForLog:log];
+    [self.fontFix offerFontFixForLog:log];
     [self runPendingAutoCompileIfNeeded];
 }
 
@@ -1403,14 +1416,21 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)updateWordCount {
-    NSString *text = self.editorTextView.string;
-    __block NSUInteger words = 0;
-    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
-                             options:NSStringEnumerationByWords | NSStringEnumerationSubstringNotRequired
-                          usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
-        words++;
-    }];
-    [self.statusBar setWordCount:words];
+    // 按词枚举对长文（尤其中文分词）不便宜：拷一份快照到后台数，只采用最新一次的结果
+    NSString *text = [self.editorTextView.string copy];
+    NSUInteger generation = ++self.wordCountGeneration;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        __block NSUInteger words = 0;
+        [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                                 options:NSStringEnumerationByWords | NSStringEnumerationSubstringNotRequired
+                              usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
+            words++;
+        }];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (weakSelf.wordCountGeneration == generation) [weakSelf.statusBar setWordCount:words];
+        });
+    });
 }
 
 #pragma mark - 拖入图片 / 文件
@@ -1524,6 +1544,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)showWelcome {
     self.welcomeView.showsDismissButton = self.documentModel.fileURL != nil && !self.documentModel.isScratch;
     [self.welcomeView reload];
+    self.window.toolbar.visible = NO;
+    self.statusBar.hidden = YES;
+    // 隐藏下面的编辑区：否则编辑器的 I 形光标区域会透过首页生效，鼠标到处显示成文本光标
+    self.mainSplitViewController.view.hidden = YES;
+    self.logDrawer.hidden = YES;
     self.welcomeView.hidden = NO;
     [self.window makeFirstResponder:self.welcomeView];
     self.window.title = @"TeXMini";
@@ -1533,6 +1558,10 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)hideWelcome {
     if (![self isShowingWelcome]) return;
     self.welcomeView.hidden = YES;
+    self.mainSplitViewController.view.hidden = NO;
+    self.logDrawer.hidden = NO;
+    self.window.toolbar.visible = YES;
+    self.statusBar.hidden = NO;
     [self refreshWindowTitle];
     [self.window makeFirstResponder:self.editorTextView];
 }
@@ -1565,6 +1594,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         dispatch_async(dispatch_get_main_queue(), ^{ [self.editorTextView scrollRangeToVisible:sel]; });
         return;
     }
+    // 没有可恢复的文件：先载入 initForSessionRestore 延后的空白文档，保证编辑器状态完整
+    [self loadDocumentIntoEditor];
     if (folder) {
         [self openFolderAtURL:folder];
         return;
@@ -1600,7 +1631,27 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 #pragma mark - TMWelcomeViewDelegate
 
-- (void)welcomeViewDidRequestNewDocument:(TMWelcomeView *)view { [self showTemplateMenuAction:nil]; }
+- (void)welcomeViewDidRequestNewDocument:(TMWelcomeView *)view {
+    [self welcomeView:view didSelectTemplateAtIndex:2];
+}
+
+- (void)welcomeView:(TMWelcomeView *)view didSelectTemplateAtIndex:(NSInteger)index {
+    if (![self confirmDiscardChangesWithTitle:@"创建新文档前是否保存当前文档的更改？"]) {
+        return;
+    }
+    switch (index) {
+        case 0: [self applyDefaultTemplate:nil]; break;
+        case 1: [self applyChineseTemplate:nil]; break;
+        case 2:
+        default: [self applyBlankTemplate:nil]; break;
+    }
+    [self hideWelcome];
+}
+
+- (void)welcomeViewDidRequestTemplatePicker:(TMWelcomeView *)view {
+    [self showTemplateMenuAction:nil];
+}
+
 - (void)welcomeViewDidRequestOpenFile:(TMWelcomeView *)view { [self openFileAction:nil]; }
 - (void)welcomeViewDidRequestOpenFolder:(TMWelcomeView *)view { [self openFolderAction:nil]; }
 - (void)welcomeViewDidRequestDismiss:(TMWelcomeView *)view { [self hideWelcome]; }
@@ -1611,245 +1662,17 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if ([self isShowingWelcome]) [view reload];
 }
 
-#pragma mark - 文档字体
+#pragma mark - 文档字体（实现在 TMFontFixController）
 
-- (BOOL)isCurrentDocumentURL:(nullable NSURL *)url {
-    NSURL *current = self.documentModel.fileURL;
-    if (!url || !current) return url == current;
-    return [url.URLByStandardizingPath.URLByResolvingSymlinksInPath.path
-            isEqualToString:current.URLByStandardizingPath.URLByResolvingSymlinksInPath.path];
+/// 字体功能用到时才创建：多数会话里根本不会碰它。
+- (TMFontFixController *)fontFix {
+    if (!_fontFix) _fontFix = [[TMFontFixController alloc] initWithHost:self];
+    return _fontFix;
 }
 
-/// 编辑器里的是当前文件的最新内容；其他文件读磁盘。
-- (nullable NSString *)latestContentOfFileURL:(nullable NSURL *)url {
-    if ([self isCurrentDocumentURL:url]) return self.editorTextView.string;
-    return [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
-}
-
-/// 当前文件可撤销地改；其他文件直接写盘。返回 NO 表示写盘失败（已弹错误）。
-- (BOOL)writeContent:(NSString *)content toFileURL:(nullable NSURL *)url actionName:(NSString *)actionName {
-    if ([self isCurrentDocumentURL:url]) {
-        [self.editorTextView replaceTextWith:content actionName:actionName];
-        return YES;
-    }
-    NSError *err = nil;
-    if (![content writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&err]) {
-        [[NSAlert alertWithError:err] beginSheetModalForWindow:self.window completionHandler:nil];
-        return NO;
-    }
-    return YES;
-}
-
-/// 编辑 › 文档字体…：字体设置写在主文件的导言区；当前文件不是主文件时先问要不要打开主文件。
-- (void)showDocumentFontsSheet {
-    if (![TMFontSettings contentHasPreamble:self.editorTextView.string]) {
-        NSURL *main = [self mainFileURLForCompile];
-        if (!main || [self isCurrentDocumentURL:main]) {
-            [self.statusBar showInfoMessage:@"当前文档没有导言区（\\documentclass … \\begin{document}），无法设置字体"];
-            return;
-        }
-        NSAlert *alert = [[NSAlert alloc] init];
-        alert.messageText = @"字体设置写在主文件的导言区";
-        alert.informativeText = [NSString stringWithFormat:@"当前文件没有 \\documentclass。要打开主文件 %@ 吗？", main.lastPathComponent];
-        [alert addButtonWithTitle:@"打开主文件"];
-        [alert addButtonWithTitle:@"取消"];
-        [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
-            if (response != NSAlertFirstButtonReturn) return;
-            [self openDocumentAtURL:main];
-            // 用户可能在“保存更改？”里取消了切换
-            if ([self isCurrentDocumentURL:main] && [TMFontSettings contentHasPreamble:self.editorTextView.string]) {
-                dispatch_async(dispatch_get_main_queue(), ^{ [self showDocumentFontsSheet]; });
-            }
-        }];
-        return;
-    }
-    [[TMFontCatalog shared] loadWithCompletion:^(NSArray<TMFontFamily *> *families) {
-        [self presentDocumentFontsSheetWithFamilies:families];
-    }];
-}
-
-- (void)presentDocumentFontsSheetWithFamilies:(NSArray<TMFontFamily *> *)families {
-    NSString *content = self.editorTextView.string;
-    NSString *cls = [TMFontSettings documentClassInContent:content] ?: @"";
-    BOOL ctex = [TMFontSettings isCTeXContent:content];
-    TMDocumentFontView *fontView = [[TMDocumentFontView alloc] initWithFamilies:families
-                                                                        current:[TMFontSettings settingsInContent:content]
-                                                                    sizeOptions:[TMFontSettings sizeOptionsForDocumentClass:cls]
-                                                                cjkDefaultTitle:ctex ? @"文档默认（ctex 自动：宋体）" : @"不设置"];
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"文档字体";
-    alert.informativeText = @"写入当前文件的导言区，⌘Z 可撤销。字体设置需要 XeLaTeX 编译（自动模式会自动切换）。";
-    [alert addButtonWithTitle:@"应用"];
-    [alert addButtonWithTitle:@"取消"];
-    alert.buttons[1].keyEquivalent = @"\e";
-    alert.accessoryView = fontView;
-    alert.window.initialFirstResponder = fontView.latinPopup;
-
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
-        if (response != NSAlertFirstButtonReturn) return;
-        TMDocumentFontSettings *settings = fontView.selectedSettings;
-        NSString *latest = self.editorTextView.string;
-        NSString *updated = [TMFontSettings contentByApplyingSettings:settings
-                                                          cjkFakeBold:fontView.selectedCJKFontNeedsFakeBold
-                                                            toContent:latest];
-        if (!updated || [updated isEqualToString:latest]) return;
-        [self.editorTextView replaceTextWith:updated actionName:@"设置文档字体"];
-
-        NSString *engine = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:updated];
-        BOOL usesFonts = settings.latinFont || settings.cjkFont;
-        BOOL engineOK = [engine isEqualToString:@"xelatex"] || ([engine isEqualToString:@"lualatex"] && [TMFontSettings isCTeXContent:updated]);
-        if (usesFonts && !engineOK) {
-            [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已写入字体设置，但当前引擎是 %@：请在状态栏切换到 XeLaTeX 或自动", engine]];
-            return;
-        }
-        [self compileCurrentDocument];
-    }];
-}
-
-#pragma mark - 缺失字体：一键替换
-
-/// 编译失败且日志里有“找不到字体”时调用：ctex fontset 引起的建议删掉 fontset，其余按替换表找本机可用的字体。
-- (void)offerFontFixForLog:(NSString *)log {
-    NSArray<NSString *> *missing = [TMFontSettings missingFontNamesInLog:log];
-    if (missing.count == 0 || self.isShowingFontFixAlert) return;
-    if (!self.declinedFontFixes) self.declinedFontFixes = [NSMutableSet set];
-    if ([[NSSet setWithArray:missing] isSubsetOfSet:self.declinedFontFixes]) return;
-
-    NSString *fontset = [TMFontSettings failingCTeXFontsetInLog:log];
-    if (fontset) {
-        [self offerRemovingCTeXFontset:fontset missingFonts:missing];
-        return;
-    }
-    [[TMFontCatalog shared] loadWithCompletion:^(NSArray<TMFontFamily *> *families) {
-        [self offerReplacingMissingFonts:missing];
-    }];
-}
-
-- (void)offerRemovingCTeXFontset:(NSString *)fontset missingFonts:(NSArray<NSString *> *)missing {
-    NSURL *main = [self mainFileURLForCompile];
-    NSString *content = [self latestContentOfFileURL:main] ?: @"";
-    NSString *fixed = [TMFontSettings contentByRemovingCTeXFontset:fontset inContent:content];
-    if (!fixed) {
-        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"ctex 的 fontset=%@ 需要本机没有的字体（%@），请删掉这个选项", fontset, missing.firstObject]];
-        return;
-    }
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = [NSString stringWithFormat:@"本机没有 fontset=%@ 需要的字体", fontset];
-    alert.informativeText = [NSString stringWithFormat:@"ctex 的 fontset=%@ 要用“%@”等字体，这台 Mac 上没有。\n\n删掉这个选项后，ctex 会自动使用 macOS 自带的宋体、黑体、楷体；换回 Windows 编译也同样能自动适配。",
-                             fontset, missing.firstObject];
-    [alert addButtonWithTitle:@"删除选项并重新编译"];
-    [alert addButtonWithTitle:@"取消"];
-    alert.buttons[1].keyEquivalent = @"\e";
-    self.isShowingFontFixAlert = YES;
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
-        self.isShowingFontFixAlert = NO;
-        if (response != NSAlertFirstButtonReturn) {
-            [self.declinedFontFixes addObjectsFromArray:missing];
-            return;
-        }
-        if ([self writeContent:fixed toFileURL:main actionName:@"删除 ctex fontset"]) [self compileCurrentDocument];
-    }];
-}
-
-/// 当前文件 + 主文件 + 项目里的 .tex / .sty / .cls（模板常把字体写死在 .cls 里）。
-- (NSArray<NSURL *> *)fontFixCandidateFileURLs {
-    NSMutableOrderedSet<NSURL *> *urls = [NSMutableOrderedSet orderedSet];
-    if (self.documentModel.fileURL) [urls addObject:self.documentModel.fileURL.URLByStandardizingPath];
-    NSURL *main = [self mainFileURLForCompile];
-    if (main) [urls addObject:main.URLByStandardizingPath];
-    if (self.projectRootURL) {
-        NSMutableArray<TMFileNode *> *stack = [[TMProject fileTreeForDirectory:self.projectRootURL maxDepth:4] mutableCopy];
-        while (stack.count && urls.count < 300) {
-            TMFileNode *node = stack.lastObject;
-            [stack removeLastObject];
-            if (node.isDirectory) { [stack addObjectsFromArray:node.children]; continue; }
-            if ([@[@"tex", @"sty", @"cls"] containsObject:node.url.pathExtension.lowercaseString]) [urls addObject:node.url.URLByStandardizingPath];
-        }
-    }
-    return urls.array;
-}
-
-- (void)offerReplacingMissingFonts:(NSArray<NSString *> *)missing {
-    TMFontCatalog *catalog = [TMFontCatalog shared];
-    NSArray<NSURL *> *urls = [self fontFixCandidateFileURLs];
-    NSURL *currentURL = self.documentModel.fileURL.URLByStandardizingPath;
-    NSString *currentText = self.editorTextView.string;
-
-    // 替换表：日志报的缺失字体 + 文件里其他本机也没有的“换台电脑就没了”的字体，一次改完，免得编译一次报一个
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSMutableDictionary<NSURL *, NSString *> *contents = [NSMutableDictionary dictionary];
-        NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSetWithArray:missing];
-        for (NSURL *url in urls) {
-            NSString *text = [url isEqual:currentURL] ? currentText : [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
-            if (text.length == 0 || text.length > 2000000) continue;
-            contents[url] = text;
-            [names addObjectsFromArray:[TMFontSettings knownReplaceableFontNamesInContent:text]];
-        }
-        dispatch_async(dispatch_get_main_queue(), ^{
-            NSMutableDictionary<NSString *, NSString *> *replacements = [NSMutableDictionary dictionary];
-            NSMutableArray<NSString *> *unresolved = [NSMutableArray array];
-            for (NSString *name in names) {
-                BOOL reportedMissing = [missing containsObject:name];
-                if (!reportedMissing && [catalog familyNamed:name]) continue; // 本机有，不动
-                NSString *to = nil;
-                for (NSString *candidate in [TMFontSettings replacementCandidatesForFont:name]) {
-                    if ([catalog familyNamed:candidate]) { to = [catalog familyNamed:candidate].familyName; break; }
-                }
-                if (to) replacements[name] = to;
-                else if (reportedMissing) [unresolved addObject:name];
-            }
-
-            NSMutableDictionary<NSURL *, NSString *> *fixed = [NSMutableDictionary dictionary];
-            for (NSURL *url in contents) {
-                NSUInteger n = 0;
-                NSString *out = [TMFontSettings contentByReplacingFonts:replacements inContent:contents[url] count:&n];
-                if (n > 0) fixed[url] = out;
-            }
-            if (fixed.count == 0) {
-                [self.statusBar showInfoMessage:[NSString stringWithFormat:@"本机没有字体“%@”，可在 编辑 › 文档字体… 里换一个", missing.firstObject]];
-                return;
-            }
-            [self confirmFontReplacements:replacements unresolved:unresolved files:fixed missing:missing];
-        });
-    });
-}
-
-- (void)confirmFontReplacements:(NSDictionary<NSString *, NSString *> *)replacements
-                     unresolved:(NSArray<NSString *> *)unresolved
-                          files:(NSDictionary<NSURL *, NSString *> *)files
-                        missing:(NSArray<NSString *> *)missing {
-    if (self.isShowingFontFixAlert) return;
-    NSMutableString *info = [NSMutableString string];
-    for (NSString *from in [replacements.allKeys sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
-        TMFontFamily *to = [[TMFontCatalog shared] familyNamed:replacements[from]];
-        NSString *toTitle = [to.displayName isEqualToString:to.familyName] ? to.familyName
-                                                                           : [NSString stringWithFormat:@"%@（%@）", to.displayName, to.familyName];
-        [info appendFormat:@"%@ → %@\n", from, toTitle];
-    }
-    for (NSString *name in unresolved) [info appendFormat:@"%@ → 没有合适的替代，请在 编辑 › 文档字体… 里另选\n", name];
-    NSMutableArray<NSString *> *fileNames = [NSMutableArray array];
-    for (NSURL *url in files) [fileNames addObject:url.lastPathComponent];
-    [info appendFormat:@"\n将修改：%@\n只改字体命令所在的行。", [fileNames componentsJoinedByString:@"、"]];
-
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = missing.count == 1 ? [NSString stringWithFormat:@"本机没有字体“%@”", missing.firstObject] : @"本机缺少文档用到的字体";
-    alert.informativeText = info;
-    [alert addButtonWithTitle:@"替换并重新编译"];
-    [alert addButtonWithTitle:@"取消"];
-    alert.buttons[1].keyEquivalent = @"\e";
-    self.isShowingFontFixAlert = YES;
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
-        self.isShowingFontFixAlert = NO;
-        if (response != NSAlertFirstButtonReturn) {
-            [self.declinedFontFixes addObjectsFromArray:missing];
-            return;
-        }
-        for (NSURL *url in files) {
-            if (![self writeContent:files[url] toFileURL:url actionName:@"替换缺失字体"]) return;
-        }
-        [self compileCurrentDocument];
-    }];
-}
+- (void)showDocumentFontsSheet { [self.fontFix showDocumentFontsSheet]; }
+- (nullable NSURL *)currentDocumentFileURL { return self.documentModel.fileURL; }
+- (void)showInfoMessage:(NSString *)message { [self.statusBar showInfoMessage:message]; }
 
 #pragma mark - 编辑器字号
 
@@ -2123,78 +1946,19 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 /// 模板选择：一个简洁的 sheet，三个单选项 + 一句说明，回车即用。
 - (void)showTemplateMenuAction:(id)sender {
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"从模板新建";
-    alert.informativeText = @"选择一个起点。当前文档若有未保存的更改会先询问。";
-    [alert addButtonWithTitle:@"使用模板"];
-    [alert addButtonWithTitle:@"取消"];
-    alert.buttons[1].keyEquivalent = @"\e";
-
-    NSArray<NSArray<NSString *> *> *templates = @[
-        @[@"学术论文", @"article · amsmath · pdflatex，含标题、章节与公式示例"],
-        @[@"中文报告", @"ctexart · 自动使用 XeLaTeX，含中文排版与操作提示"],
-        @[@"空白文档", @"最小 article 骨架，只有 \\begin{document} … \\end{document}"],
+    // 以后新增预设模板：在这里加一项，并在下面的 switch 里对应处理
+    NSArray<TMTemplateItem *> *templates = @[
+        [TMTemplateItem itemWithTitle:@"学术论文" subtitle:@"article · amsmath · pdfLaTeX，含标题、章节与公式示例" symbol:@"graduationcap"],
+        [TMTemplateItem itemWithTitle:@"中文报告" subtitle:@"ctexart · 自动使用 XeLaTeX，含中文排版与操作提示" symbol:@"doc.richtext"],
+        [TMTemplateItem itemWithTitle:@"空白文档" subtitle:@"最小 article 骨架，只有 document 环境" symbol:@"doc"],
     ];
-    NSStackView *stack = [[NSStackView alloc] init];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 10;
-    NSMutableArray<NSButton *> *radios = [NSMutableArray array];
-    [templates enumerateObjectsUsingBlock:^(NSArray<NSString *> *t, NSUInteger idx, BOOL *stop) {
-        NSButton *radio = [NSButton radioButtonWithTitle:t[0] target:nil action:@selector(templateRadioChanged:)];
-        radio.tag = (NSInteger)idx;
-        radio.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
-        radio.state = idx == 0 ? NSControlStateValueOn : NSControlStateValueOff;
-        NSTextField *desc = [NSTextField wrappingLabelWithString:t[1]];
-        desc.font = [NSFont systemFontOfSize:11];
-        desc.textColor = [NSColor secondaryLabelColor];
-        desc.preferredMaxLayoutWidth = 300;
-        NSStackView *row = [NSStackView stackViewWithViews:@[radio, desc]];
-        row.orientation = NSUserInterfaceLayoutOrientationVertical;
-        row.alignment = NSLayoutAttributeLeading;
-        row.spacing = 2;
-        row.edgeInsets = NSEdgeInsetsMake(0, 0, 0, 0);
-        desc.translatesAutoresizingMaskIntoConstraints = NO;
-        [desc.leadingAnchor constraintEqualToAnchor:radio.leadingAnchor constant:20].active = YES;
-        [stack addArrangedSubview:row];
-        [radios addObject:radio];
-    }];
-    for (NSButton *r in radios) { r.target = self; }
-    NSView *box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 340, 150)];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [box addSubview:stack];
-    [NSLayoutConstraint activateConstraints:@[
-        [stack.topAnchor constraintEqualToAnchor:box.topAnchor],
-        [stack.leadingAnchor constraintEqualToAnchor:box.leadingAnchor],
-        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:box.trailingAnchor],
-        [stack.bottomAnchor constraintLessThanOrEqualToAnchor:box.bottomAnchor],
-    ]];
-    [box layoutSubtreeIfNeeded];
-    box.frame = NSMakeRect(0, 0, 340, MAX(150.0, stack.fittingSize.height));
-    alert.accessoryView = box;
-    alert.window.initialFirstResponder = radios.firstObject;
-
-    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
-        if (response != NSAlertFirstButtonReturn) return;
-        NSInteger chosen = 0;
-        for (NSButton *r in radios) if (r.state == NSControlStateValueOn) chosen = r.tag;
-        switch (chosen) {
+    [TMTemplatePicker presentWithItems:templates forWindow:self.window completion:^(NSInteger index) {
+        switch (index) {
             case 0: [self applyDefaultTemplate:nil]; break;
             case 1: [self applyChineseTemplate:nil]; break;
             default: [self applyBlankTemplate:nil]; break;
         }
     }];
-}
-
-- (void)templateRadioChanged:(NSButton *)sender {
-    // 兄弟 radio 互斥（它们在不同的行 stack 里，AppKit 不会自动分组）
-    NSView *container = sender.superview.superview;
-    for (NSView *row in container.subviews) {
-        for (NSView *v in row.subviews) {
-            if ([v isKindOfClass:[NSButton class]] && v != sender) ((NSButton *)v).state = NSControlStateValueOff;
-        }
-    }
-    sender.state = NSControlStateValueOn;
 }
 
 - (void)applyDefaultTemplate:(id)sender {

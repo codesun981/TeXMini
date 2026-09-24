@@ -95,7 +95,15 @@
 
 static NSArray<NSString *> *TMCaptures(NSString *pattern, NSString *text) {
     if (text.length == 0) return @[];
-    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+    // 模式是固定的几条字面量：编译一次后复用（补全时会频繁调用）
+    static NSCache<NSString *, NSRegularExpression *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ cache = [[NSCache alloc] init]; });
+    NSRegularExpression *re = [cache objectForKey:pattern];
+    if (!re) {
+        re = [NSRegularExpression regularExpressionWithPattern:pattern options:0 error:nil];
+        if (re) [cache setObject:re forKey:pattern];
+    }
     NSMutableArray *result = [NSMutableArray array];
     NSMutableSet *seen = [NSMutableSet set];
     [re enumerateMatchesInString:text options:0 range:NSMakeRange(0, text.length)

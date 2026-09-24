@@ -22,7 +22,16 @@
 #pragma mark - 通用小工具
 
 static NSRegularExpression *TMRegex(NSString *pattern, NSRegularExpressionOptions options) {
-    return [NSRegularExpression regularExpressionWithPattern:pattern options:options error:nil];
+    static NSCache<NSString *, NSRegularExpression *> *cache;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ cache = [[NSCache alloc] init]; });
+    NSString *key = [NSString stringWithFormat:@"%lu|%@", (unsigned long)options, pattern];
+    NSRegularExpression *re = [cache objectForKey:key];
+    if (!re) {
+        re = [NSRegularExpression regularExpressionWithPattern:pattern options:options error:nil];
+        if (re) [cache setObject:re forKey:key];
+    }
+    return re;
 }
 
 /// loc 所在行里，loc 之前是否有未转义的 %（即 loc 处于注释中）。

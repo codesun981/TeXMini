@@ -163,27 +163,33 @@ static const CGFloat kTMDrawerHeaderHeight = 26.0;
 #pragma mark - 原始日志
 
 - (void)appendLogText:(NSString *)text {
+    static NSRegularExpression *fileLineError;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        fileLineError = [NSRegularExpression regularExpressionWithPattern:@"\\.tex:[0-9]+:" options:0 error:nil];
+    });
     NSFont *font = [NSFont monospacedSystemFontOfSize:11.5 weight:NSFontWeightRegular];
-    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] init];
+    NSMutableAttributedString *attr = [[NSMutableAttributedString alloc] initWithString:text attributes:@{
+        NSFontAttributeName: font,
+        NSForegroundColorAttributeName: [NSColor labelColor]
+    }];
 
     // 逐行着色：错误红、警告橙、坏盒子黄，其余默认色。
     // 注意流式输出的 chunk 可能在行中间截断，只按前缀判断，误差可接受。
-    NSArray<NSString *> *lines = [text componentsSeparatedByString:@"\n"];
-    [lines enumerateObjectsUsingBlock:^(NSString *line, NSUInteger idx, BOOL *stop) {
-        NSColor *color = [NSColor labelColor];
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-        if ([trimmed hasPrefix:@"! "] || [trimmed rangeOfString:@".tex:[0-9]+:" options:NSRegularExpressionSearch].location != NSNotFound) {
+    NSCharacterSet *spaces = [NSCharacterSet whitespaceCharacterSet];
+    [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
+                             options:NSStringEnumerationByLines
+                          usingBlock:^(NSString *line, NSRange lineRange, NSRange enclosingRange, BOOL *stop) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:spaces];
+        NSColor *color = nil;
+        if ([trimmed hasPrefix:@"! "] || [fileLineError firstMatchInString:trimmed options:0 range:NSMakeRange(0, trimmed.length)]) {
             color = [NSColor systemRedColor];
         } else if ([trimmed containsString:@"Warning:"]) {
             color = [NSColor systemOrangeColor];
         } else if ([trimmed hasPrefix:@"Overfull"] || [trimmed hasPrefix:@"Underfull"]) {
             color = [NSColor systemYellowColor];
         }
-        NSString *piece = idx < lines.count - 1 ? [line stringByAppendingString:@"\n"] : line;
-        [attr appendAttributedString:[[NSAttributedString alloc] initWithString:piece attributes:@{
-            NSFontAttributeName: font,
-            NSForegroundColorAttributeName: color
-        }]];
+        if (color) [attr addAttribute:NSForegroundColorAttributeName value:color range:lineRange];
     }];
 
     [_textView.textStorage appendAttributedString:attr];

@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, readonly, nullable) NSURL *currentPDFURL;
 
 - (instancetype)initWithDocument:(TMDocument *)document;
+/// 启动用：先不把文档载入编辑器，随后必须调用 restoreLastSessionOrShowWelcome（省掉一次空白模板的整套加载）。
+- (instancetype)initForSessionRestore;
 - (void)newDocumentAction:(nullable id)sender;
 /// 打开文件或文件夹：目录 → 设为项目根并打开推断出的主文件；可编辑文本 → 载入编辑器；其他 → 交给系统。
 - (void)openDocumentAtURL:(NSURL *)url;
@@ -54,7 +56,6 @@ NS_ASSUME_NONNULL_BEGIN
 /// 显示 PDF 内查找栏（⇧⌘F；PDF 有焦点时 ⌘F 也走这里）。
 - (void)showPDFSearchBar;
 - (void)hidePDFSearchBar;
-- (BOOL)isPDFInverted;
 - (void)increaseEditorFontSize;
 - (void)decreaseEditorFontSize;
 - (void)resetEditorFontSize;
