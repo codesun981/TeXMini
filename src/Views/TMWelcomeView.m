@@ -156,7 +156,7 @@ static NSTextField *TMKeyCapLabel(NSString *text) {
     headerStack.spacing = 8;
     [headerStack setCustomSpacing:14 afterView:_logoImageView];
 
-    // ── 三张新建卡片 ─────────────────────────────────────────
+    // ── 两张新建卡片 ─────────────────────────────────────────
     __weak typeof(self) weakSelf = self;
     NSView *cardBlank = [self cardWithSymbol:@"plus" accent:YES title:@"新建空白文档" subtitle:@"纯净起步，快速书写"
                                     shortcut:@"⌘N" onClick:^{ [weakSelf selectTemplate:2]; }];

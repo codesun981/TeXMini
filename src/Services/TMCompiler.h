@@ -51,14 +51,19 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
                                     shellEscape:(BOOL)shellEscape
                                  extraArguments:(nullable NSArray<NSString *> *)extra;
 
-/// 编译 texFileURL。若文件声明了 `% !TEX root`，实际编译 root 文件���回调里的 pdfURL 也对应 root。
+/// 编译 texFileURL。若文件声明了 `% !TEX root`，实际编译 root 文件，回调里的 pdfURL 也对应 root。
 /// 只要 latexmk 可用就统一走 latexmk（自动跑够遍数），显式选择的引擎映射为 -xelatex / -pdf；
 /// 没有 latexmk 时才直接调用引擎单遍。
 - (void)compileFileAtURL:(NSURL *)texFileURL;
 - (void)cancelCompilation;
 
-/// 根据用户选择 + 魔法注释 + 内容启发式，得出实际使用的引擎名（用于状态栏显示）。
+/// 根据用户选择 + 魔法注释 + 内容启发式，得出实际使用的引擎名（不看依赖的 .cls / .sty）。
 - (NSString *)effectiveEngineNameForContent:(NSString *)content;
+/// 同上，并在 directoryURL（主文件所在目录）里顺着 \documentclass / \usepackage 查看 .cls / .sty（最多两层），
+/// 找不到的非标准文档类再问 kpsewhich。reason 返回判断依据（状态栏 tooltip 用）。
+- (NSString *)effectiveEngineNameForContent:(NSString *)content
+                               directoryURL:(nullable NSURL *)directoryURL
+                                     reason:(NSString * _Nullable * _Nullable)reason;
 
 @end
 

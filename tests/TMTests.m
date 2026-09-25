@@ -745,7 +745,135 @@ TM_TEST(test_compiler_font_commands_pick_xelatex) {
     TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{article}\n\\usepackage{unicode-math}\n\\setmainfont{Georgia}\n"], @"xelatex");
 }
 
-#pragma mark - TMFontCatalog
+TM_TEST(test_compiler_engine_follows_template_class) {
+    // 中文模板常把 ctex 藏在 .cls 里：正文只有 \documentclass{gmcmthesis}
+    NSURL *dir = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString] isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [@"\\NeedsTeXFormat{LaTeX2e}\n\\LoadClass{ctexart}\n" writeToURL:[dir URLByAppendingPathComponent:@"gmcmthesis.cls"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // 两层：mythesis.cls → mystyle.sty → xeCJK
+    [@"\\LoadClass{article}\n\\RequirePackage{mystyle}\n" writeToURL:[dir URLByAppendingPathComponent:@"mythesis.cls"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    [@"\\RequirePackage{xeCJK}\n" writeToURL:[dir URLByAppendingPathComponent:@"mystyle.sty"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    TMCompiler *c = [[TMCompiler alloc] init];
+    NSString *reason = nil;
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{gmcmthesis}\n\\begin{document}\nabc\n\\end{document}\n" directoryURL:dir reason:&reason], @"xelatex");
+    TM_ASSERT_TRUE([reason containsString:@"gmcmthesis.cls"]);
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{mythesis}\n" directoryURL:dir reason:&reason], @"xelatex");
+    TM_ASSERT_TRUE([reason containsString:@"mystyle.sty"]);
+    // 不给目录时维持老行为
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{gmcmthesis}\n"], @"pdflatex");
+    // 手动选择与魔法注释仍然优先
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"% !TEX program = pdflatex\n\\documentclass{gmcmthesis}\n" directoryURL:dir reason:&reason], @"pdflatex");
+    c.engine = TMTeXEngineLuaLaTeX;
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{gmcmthesis}\n" directoryURL:dir reason:&reason], @"lualatex");
+    [[NSFileManager defaultManager] removeItemAtURL:dir error:nil];
+}
+
+TM_TEST(test_compiler_engine_chinese_text) {
+    TMCompiler *c = [[TMCompiler alloc] init];
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{article}\n\\begin{document}\n你好，世界\n\\end{document}\n"], @"xelatex");
+    // CJK 宏包是 pdfLaTeX 的中文方案，不要改引擎
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{article}\n\\usepackage{CJKutf8}\n\\begin{document}\n\\begin{CJK}{UTF8}{gbsn}你好\\end{CJK}\n\\end{document}\n"], @"pdflatex");
+    // 只有注释里有中文 / 注释掉的 ctex 不算
+    TM_ASSERT_EQ_STR([c effectiveEngineNameForContent:@"\\documentclass{article}\n% 这是注释 \\usepackage{ctex}\nHello\n"], @"pdflatex");
+}
+
+TM_TEST(test_log_stale_auxiliary_file_detection) {
+    // 以下日志片段取自 TeX Live 2026 的真实输出
+    NSString *head = @"This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026)\n(./main.tex\nLaTeX2e <2025-11-01>\n"
+                     @"(/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls\n"
+                     @"(/usr/local/texlive/2026/texmf-dist/tex/latex/base/size10.clo))\n";
+    // 截断的 .aux（上次编译中断）：报在 \begin{document} 这一行
+    NSString *aux = [head stringByAppendingString:@"(./main.aux)\nRunaway argument?\n{{1}{1} \n"
+                     @"./main.tex:2: File ended while scanning use of \\@newl@bel.\n<inserted text> \n                \\par \nl.2 \\begin{document}\n"];
+    TM_ASSERT_EQ_STR([TMLogParser staleAuxiliaryFileInLog:aux], @"main.aux");
+    // 截断的 .toc：报在 \tableofcontents 这一行
+    NSString *toc = [head stringByAppendingString:@"(./main.aux) (./main.toc\nRunaway argument?\n"
+                     @"./main.tex:3: File ended while scanning use of \\contentsline.\nl.3 \\tableofcontents\n"];
+    TM_ASSERT_EQ_STR([TMLogParser staleAuxiliaryFileInLog:toc], @"main.toc");
+    // 换了文献样式后的旧 .bbl：直接报在 .bbl 里
+    NSString *bbl = [head stringByAppendingString:@"(./main.aux) (./main.bbl\n./main.bbl:3: Undefined control sequence.\nl.3 \\bibitem[Old(2020)]{k}\\natexlab\n"];
+    TM_ASSERT_EQ_STR([TMLogParser staleAuxiliaryFileInLog:bbl], @"main.bbl");
+    // \include 的章节 .aux 截断：报在主 .aux 里
+    NSString *chapter = [head stringByAppendingString:@"(./b.aux (./chapters/intro.aux\nRunaway argument?\n"
+                         @"./b.aux:2: File ended while scanning use of \\@newl@bel.\nl.2 \\@input{chapters/intro.aux}\n"];
+    TM_ASSERT_EQ_STR([TMLogParser staleAuxiliaryFileInLog:chapter], @"b.aux");
+
+    // 以下都是正文自己的错误，不能清理
+    NSString *body = [head stringByAppendingString:@"(./main.aux)\n./main.tex:3: Undefined control sequence.\nl.3 Hello \\undefinedmacro\n"];
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:body] == nil);
+    // 错误恰好写在 \begin{document} 同一行，且刚读过 .aux
+    NSString *sameLine = [head stringByAppendingString:@"(./d.aux)\n./d.tex:2: Undefined control sequence.\nl.2 \\begin{document}\\undefinedfoo\n"];
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:sameLine] == nil);
+    // 第一个错误在正文，后面才有辅助文件的连带错误
+    NSString *cascade = [head stringByAppendingString:@"./main.tex:5: Missing $ inserted.\nl.5 a_b\n(./main.aux)\n./main.aux:3: Undefined control sequence.\n"];
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:cascade] == nil);
+    // 多遍编译：只看最后一遍（前一遍的 .bbl 错误已经过去了）
+    NSString *multi = [NSString stringWithFormat:@"%@(./main.aux) (./main.bbl\n./main.bbl:3: Undefined control sequence.\n%@(./main.aux)\n./main.tex:3: Undefined control sequence.\nl.3 Hello \\oops\n", head, head];
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:multi] == nil);
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:@""] == nil);
+    // 正文里的 "This is" 出现在坏盒子里（不在行首），不能当成新一遍编译的开头
+    NSString *overfull = [head stringByAppendingString:@"(./main.aux)\nOverfull \\hbox (1.0pt too wide) in paragraph at lines 3--4\n"
+                          @"[]\\OT1/cmr/m/n/10 This is a very long line\nRunaway argument?\n"
+                          @"./main.tex:5: File ended while scanning use of \\@newl@bel.\nl.5 \\end{document}\n"];
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:overfull] != nil);
+    // 找不到 TeX 的启动行（TeX 根本没跑起来，比如 latexmk 自己报错）：不判断
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:@"Latexmk: This is Latexmk\n(./main.aux)\n./main.aux:2: Undefined control sequence.\n"] == nil);
+    // 正文漏了右括号：文件结束时出错，但出错位置不是读辅助文件的命令（真实日志）
+    NSString *unclosed = [head stringByAppendingString:@"(./t1.aux))\nRunaway argument?\n{world \\end {document} \n"
+                          @"! File ended while scanning use of \\textbf .\n<inserted text> \n                \\par \n<*> t1.tex\n"];
+    TM_ASSERT_TRUE([TMLogParser staleAuxiliaryFileInLog:unclosed] == nil);
+}
+
+TM_TEST(test_clean_removes_glossary_and_chapter_aux) {
+    NSURL *dir = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString] isDirectory:YES];
+    NSFileManager *fm = [NSFileManager defaultManager];
+    for (NSString *sub in @[@"chapters", @"other-project"]) {
+        [fm createDirectoryAtURL:[dir URLByAppendingPathComponent:sub] withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+    NSArray *names = @[@"main.tex", @"main.glo", @"main.gls", @"main.acn", @"main.ist", @"main.lol", @"main.ent", @"main.xyc", @"main.bbl",
+                       @"chapters/intro.tex", @"chapters/intro.aux", @"chapters/notes.tex", @"chapters/notes.aux",
+                       @"other-project/paper.tex", @"other-project/paper.aux", @"refs.bib", @"figure.pdf"];
+    for (NSString *n in names) [@"x" writeToURL:[dir URLByAppendingPathComponent:n] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    // 主 .aux 只 \@input 了 intro 一章（外加一个指向项目外的，不能碰）
+    [@"\\relax\n\\@input{chapters/intro.aux}\n\\@input{../outside.aux}\n" writeToURL:[dir URLByAppendingPathComponent:@"main.aux"]
+                                                                         atomically:YES encoding:NSUTF8StringEncoding error:nil];
+
+    NSURL *main = [dir URLByAppendingPathComponent:@"main.tex"];
+    [TMDocument cleanAuxiliaryFilesForTeXFileURL:main keepingBibliography:YES];
+    TM_ASSERT_TRUE([fm fileExistsAtPath:[dir URLByAppendingPathComponent:@"main.bbl"].path]);   // 要求保留 .bbl
+    [TMDocument cleanAuxiliaryFilesForTeXFileURL:main];
+
+    for (NSString *gone in @[@"main.aux", @"main.glo", @"main.gls", @"main.acn", @"main.ist", @"main.lol", @"main.ent", @"main.xyc", @"main.bbl",
+                             @"chapters/intro.aux"]) {
+        TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir URLByAppendingPathComponent:gone].path]);
+    }
+    // 源文件、参考文献库、插图保留；主 .aux 没列出的章节 .aux、同目录下别的项目的 .aux 也不动
+    for (NSString *kept in @[@"main.tex", @"chapters/intro.tex", @"chapters/notes.aux", @"other-project/paper.aux", @"refs.bib", @"figure.pdf"]) {
+        TM_ASSERT_TRUE([fm fileExistsAtPath:[dir URLByAppendingPathComponent:kept].path]);
+    }
+    [fm removeItemAtURL:dir error:nil];
+}
+
+TM_TEST(test_bibliography_regenerable_only_with_bib_source) {
+    NSURL *dir = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString] isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    NSURL *main = [dir URLByAppendingPathComponent:@"main.tex"];
+    void (^write)(NSString *) = ^(NSString *text) { [text writeToURL:main atomically:YES encoding:NSUTF8StringEncoding error:nil]; };
+
+    // arXiv 式：只有 .bbl，没有 .bib
+    write(@"\\documentclass{article}\n\\begin{document}\n\\cite{k}\n\\bibliographystyle{plain}\n\\bibliography{refs}\n\\end{document}\n");
+    TM_ASSERT_TRUE(![TMProject canRegenerateBibliographyForTeXFileURL:main]);
+    [@"@article{k,}" writeToURL:[dir URLByAppendingPathComponent:@"refs.bib"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    TM_ASSERT_TRUE([TMProject canRegenerateBibliographyForTeXFileURL:main]);
+    // biblatex 的 \addbibresource 带扩展名
+    write(@"\\usepackage{biblatex}\n\\addbibresource{refs.bib}\n");
+    TM_ASSERT_TRUE([TMProject canRegenerateBibliographyForTeXFileURL:main]);
+    // 注释掉的不算；\bibliographystyle 不是 \bibliography
+    write(@"% \\bibliography{refs}\n\\bibliographystyle{refs}\n\\input{main.bbl}\n");
+    TM_ASSERT_TRUE(![TMProject canRegenerateBibliographyForTeXFileURL:main]);
+    [[NSFileManager defaultManager] removeItemAtURL:dir error:nil];
+}
 
 TM_TEST(test_font_catalog_lists_songti_and_hides_pingfang) {
     NSArray<TMFontFamily *> *families = [TMFontCatalog enumerateSystemFamilies];

@@ -13,6 +13,90 @@
 
 @implementation TMLogParser
 
+/// 编译过程中生成、下次编译又会读回来的文件：内容坏了（上次中断）或过时了（换了宏包 / 文献样式）会让编译失败。
+static BOOL TMIsGeneratedAuxExtension(NSString *ext) {
+    static NSSet<NSString *> *generated;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        generated = [NSSet setWithArray:@[@"aux", @"bbl", @"toc", @"lof", @"lot", @"lol", @"loa", @"nav", @"snm", @"out",
+                                          @"ind", @"gls", @"acr", @"nls", @"brf", @"vrb", @"thm"]];
+    });
+    return [generated containsObject:ext.lowercaseString];
+}
+
+/// 会把辅助文件读进来的命令：辅助文件内容有问题时，TeX 报错的 "l.N" 行就是这些命令所在的行。
+static BOOL TMLineReadsAuxiliaryFile(NSString *sourceLine) {
+    static NSArray<NSString *> *readers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        readers = @[@"\\begin{document}", @"\\end{document}", @"\\tableofcontents", @"\\listoffigures", @"\\listoftables",
+                    @"\\listof", @"\\bibliography", @"\\printbibliography", @"\\printglossar", @"\\printacronyms",
+                    @"\\printnomenclature", @"\\printindex", @"\\include{"];
+    });
+    for (NSString *r in readers) {
+        if ([sourceLine containsString:r]) return YES;
+    }
+    return NO;
+}
+
+/// 最后一遍 TeX 运行在日志里的范围：从它的启动行（行首的 "This is pdfTeX, Version …"，XeTeX / LuaHBTeX 同理）到结尾。
+/// latexmk 多遍编译时前几遍的输出也在日志里。找不到启动行（TeX 根本没跑起来）返回 NSNotFound。
+static NSRange TMLastTeXRun(NSString *log) {
+    NSRange search = NSMakeRange(0, log.length);
+    while (search.length > 0) {
+        NSRange hit = [log rangeOfString:@"This is " options:NSBackwardsSearch range:search];
+        if (hit.location == NSNotFound) break;
+        // 行首才算：正文里的 "This is" 会出现在坏盒子、错误上下文里，但都不在行首
+        if (hit.location == 0 || [log characterAtIndex:hit.location - 1] == '\n') {
+            NSString *line = [log substringWithRange:[log lineRangeForRange:hit]];
+            if ([line containsString:@"TeX, Version"] && ![line containsString:@"BibTeX"]) {
+                return NSMakeRange(hit.location, log.length - hit.location);
+            }
+        }
+        search.length = hit.location;
+    }
+    return NSMakeRange(NSNotFound, 0);
+}
+
++ (nullable NSString *)staleAuxiliaryFileInLog:(NSString *)log {
+    static NSRegularExpression *firstError; // "./main.bbl:3: Undefined control sequence."（-file-line-error）或 "! …"
+    static NSRegularExpression *opened;     // "(./main.aux"：TeX 打开文件时打印的 "(路径"
+    static NSRegularExpression *errorLine;  // "l.2 \begin{document}"：出错时正在读的源码行
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        firstError = [NSRegularExpression regularExpressionWithPattern:@"^(?:(?:\\./)?([^:\\n]+\\.([A-Za-z]+)):\\d+:|! )"
+                                                               options:NSRegularExpressionAnchorsMatchLines error:nil];
+        opened = [NSRegularExpression regularExpressionWithPattern:@"\\((\\.?/?[^()\\s]+\\.([A-Za-z]+))" options:0 error:nil];
+        errorLine = [NSRegularExpression regularExpressionWithPattern:@"^l\\.\\d+ (.*)$" options:NSRegularExpressionAnchorsMatchLines error:nil];
+    });
+
+    NSRange run = TMLastTeXRun(log);
+    if (run.location == NSNotFound) return nil;
+    NSTextCheckingResult *error = [firstError firstMatchInString:log options:0 range:run];
+    if (!error) return nil;
+
+    // ① 第一个错误直接报在辅助文件里（旧 .bbl：./main.bbl:3:）
+    if ([error rangeAtIndex:1].location != NSNotFound && TMIsGeneratedAuxExtension([log substringWithRange:[error rangeAtIndex:2]])) {
+        return [log substringWithRange:[error rangeAtIndex:1]].lastPathComponent;
+    }
+
+    // ② 报在正文，但三条同时满足：错误是“文件读到一半就结束了”；紧挨着错误之前打开的是辅助文件；
+    //    出错的源码行正是读它的命令（截断的 .aux 报在 \begin{document}，截断的 .toc 报在 \tableofcontents）。
+    //    正文漏了右括号、或错误恰好写在 \begin{document} 同一行时，总有一条不满足。
+    NSRange errorText = [log lineRangeForRange:NSMakeRange(error.range.location, 0)];
+    if (![[log substringWithRange:errorText] containsString:@"File ended while scanning"]) return nil;
+
+    NSUInteger windowStart = MAX(run.location, error.range.location > 600 ? error.range.location - 600 : 0);
+    NSTextCheckingResult *lastOpened = [opened matchesInString:log options:0
+                                                         range:NSMakeRange(windowStart, error.range.location - windowStart)].lastObject;
+    if (!lastOpened || !TMIsGeneratedAuxExtension([log substringWithRange:[lastOpened rangeAtIndex:2]])) return nil;
+
+    NSUInteger after = NSMaxRange(errorText);
+    NSTextCheckingResult *source = [errorLine firstMatchInString:log options:0 range:NSMakeRange(after, MIN(log.length - after, (NSUInteger)1200))];
+    if (!source || !TMLineReadsAuxiliaryFile([log substringWithRange:[source rangeAtIndex:1]])) return nil;
+    return [log substringWithRange:[lastOpened rangeAtIndex:1]].lastPathComponent;
+}
+
 + (NSArray<TMLogIssue *> *)issuesFromLog:(NSString *)log {
     NSMutableArray<TMLogIssue *> *issues = [NSMutableArray array];
     if (log.length == 0) return issues;

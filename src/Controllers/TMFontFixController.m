@@ -107,7 +107,7 @@
         if (!updated || [updated isEqualToString:latest]) return;
         [self.host.editorTextView replaceTextWith:updated actionName:@"设置文档字体"];
 
-        NSString *engine = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:updated];
+        NSString *engine = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:updated directoryURL:self.host.currentDocumentFileURL.URLByDeletingLastPathComponent reason:NULL];
         BOOL usesFonts = settings.latinFont || settings.cjkFont;
         BOOL engineOK = [engine isEqualToString:@"xelatex"] || ([engine isEqualToString:@"lualatex"] && [TMFontSettings isCTeXContent:updated]);
         if (usesFonts && !engineOK) {

@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// 显示一条中性提示（不带 spinner，不清除错误按钮之外的状态）。
 - (void)showInfoMessage:(NSString *)message;
 - (void)setSelectedEngine:(TMTeXEngine)engine;
+/// 常驻显示“目标文件 · 实际引擎”（⌘B 实际编译的文件和引擎）；tooltip 给出完整路径与引擎判断依据。
+- (void)setCompileTargetFileName:(NSString *)fileName engine:(NSString *)engine toolTip:(nullable NSString *)toolTip;
 /// 页码指示（1-based 显示）。pageCount <= 0 时隐藏。
 - (void)setPageIndex:(NSInteger)pageIndex pageCount:(NSInteger)pageCount;
 

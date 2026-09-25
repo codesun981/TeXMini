@@ -134,15 +134,43 @@
 }
 
 + (NSArray<NSString *> *)auxiliaryExtensions {
-    return @[@"aux", @"log", @"synctex.gz", @"fls", @"fdb_latexmk", @"out", @"toc", @"lof", @"lot",
-             @"bbl", @"blg", @"bcf", @"run.xml", @"nav", @"snm", @"vrb", @"idx", @"ilg", @"ind", @"xdv"];
+    return @[@"aux", @"log", @"synctex.gz", @"fls", @"fdb_latexmk", @"out", @"toc", @"lof", @"lot", @"lol", @"loa",
+             @"bbl", @"blg", @"bcf", @"run.xml", @"nav", @"snm", @"vrb", @"idx", @"ilg", @"ind", @"xdv",
+             // glossaries / nomencl：术语表、缩略语、符号表（.ist 是 glossaries 按主文件名生成的样式）
+             @"glo", @"gls", @"glg", @"glsdefs", @"acn", @"acr", @"alg", @"ist", @"xdy", @"nlo", @"nls", @"nlg",
+             // 定理列表 / 习题答案（answers、exsheets 等）/ 反向引用
+             @"thm", @"ent", @"xyc", @"brf"];
 }
 
 + (void)cleanAuxiliaryFilesForTeXFileURL:(NSURL *)texURL {
+    [self cleanAuxiliaryFilesForTeXFileURL:texURL keepingBibliography:NO];
+}
+
++ (void)cleanAuxiliaryFilesForTeXFileURL:(NSURL *)texURL keepingBibliography:(BOOL)keepBibliography {
     NSString *dir = [texURL URLByDeletingLastPathComponent].path;
     NSString *base = [texURL.URLByDeletingPathExtension lastPathComponent];
     NSFileManager *fm = [NSFileManager defaultManager];
+
+    // \include 的各章 .aux：只删主 .aux 里 \@input{…} 明确列出、且对应 .tex 存在的（必须在删主 .aux 之前读）
+    NSString *mainAux = [NSString stringWithContentsOfFile:[dir stringByAppendingPathComponent:[base stringByAppendingPathExtension:@"aux"]]
+                                                  encoding:NSUTF8StringEncoding error:nil];
+    if (mainAux) {
+        static NSRegularExpression *inputRe;
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+            inputRe = [NSRegularExpression regularExpressionWithPattern:@"\\\\@input\\{([^}]+\\.aux)\\}" options:0 error:nil];
+        });
+        NSString *root = [dir.stringByStandardizingPath stringByAppendingString:@"/"];
+        for (NSTextCheckingResult *m in [inputRe matchesInString:mainAux options:0 range:NSMakeRange(0, mainAux.length)]) {
+            NSString *chapterAux = [[dir stringByAppendingPathComponent:[mainAux substringWithRange:[m rangeAtIndex:1]]] stringByStandardizingPath];
+            if (![chapterAux hasPrefix:root]) continue;   // 不碰项目目录以外的文件
+            NSString *chapterTeX = [chapterAux.stringByDeletingPathExtension stringByAppendingPathExtension:@"tex"];
+            if ([fm fileExistsAtPath:chapterTeX]) [fm removeItemAtPath:chapterAux error:nil];
+        }
+    }
+
     for (NSString *ext in [self auxiliaryExtensions]) {
+        if (keepBibliography && [ext isEqualToString:@"bbl"]) continue;
         NSString *auxPath = [dir stringByAppendingPathComponent:[base stringByAppendingPathExtension:ext]];
         if ([fm fileExistsAtPath:auxPath]) {
             [fm removeItemAtPath:auxPath error:nil];

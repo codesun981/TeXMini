@@ -29,6 +29,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)cleanAuxiliaryFiles;
 /// 删除 texURL 同名的辅助文件；编译主文件与当前文件不同时应传主文件。
 + (void)cleanAuxiliaryFilesForTeXFileURL:(NSURL *)texURL;
+/// 同上；keepBibliography 为 YES 时保留 .bbl（自动清理且 .bbl 无法重新生成时用）。
+/// 各章 \include 生成的 .aux 按主 .aux 里的 \@input 列表一起删掉。
++ (void)cleanAuxiliaryFilesForTeXFileURL:(NSURL *)texURL keepingBibliography:(BOOL)keepBibliography;
 + (NSArray<NSString *> *)auxiliaryExtensions;
 
 @end

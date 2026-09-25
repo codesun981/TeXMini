@@ -4,6 +4,7 @@
     NSTextField *_cursorLabel;
     NSTextField *_statusLabel;
     NSTextField *_pageLabel;
+    NSTextField *_targetLabel;
     NSProgressIndicator *_spinner;
     NSButton *_errorButton;
     NSButton *_logButton;
@@ -86,6 +87,14 @@
     _pageLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:_pageLabel];
 
+    _targetLabel = [NSTextField labelWithString:@""];
+    _targetLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
+    _targetLabel.textColor = [NSColor secondaryLabelColor];
+    _targetLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _targetLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_targetLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [self addSubview:_targetLabel];
+
     [NSLayoutConstraint activateConstraints:@[
         [_cursorLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
         [_cursorLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
@@ -107,9 +116,28 @@
         [_enginePopup.trailingAnchor constraintEqualToAnchor:_logButton.leadingAnchor constant:-10],
         [_enginePopup.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
 
-        [_pageLabel.trailingAnchor constraintEqualToAnchor:_enginePopup.leadingAnchor constant:-14],
+        [_targetLabel.trailingAnchor constraintEqualToAnchor:_enginePopup.leadingAnchor constant:-6],
+        [_targetLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+        [_targetLabel.widthAnchor constraintLessThanOrEqualToConstant:280],
+        [_targetLabel.leadingAnchor constraintGreaterThanOrEqualToAnchor:_errorButton.trailingAnchor constant:16],
+
+        [_pageLabel.trailingAnchor constraintEqualToAnchor:_targetLabel.leadingAnchor constant:-14],
         [_pageLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor]
     ]];
+}
+
+- (void)setCompileTargetFileName:(NSString *)fileName engine:(NSString *)engine toolTip:(nullable NSString *)toolTip {
+    NSMutableAttributedString *text = [[NSMutableAttributedString alloc] initWithString:fileName attributes:@{
+        NSFontAttributeName: [NSFont systemFontOfSize:11 weight:NSFontWeightMedium],
+        NSForegroundColorAttributeName: [NSColor labelColor]}];
+    [text appendAttributedString:[[NSAttributedString alloc] initWithString:[@"  ·  " stringByAppendingString:engine] attributes:@{
+        NSFontAttributeName: [NSFont systemFontOfSize:11],
+        NSForegroundColorAttributeName: [NSColor secondaryLabelColor]}]];
+    NSMutableParagraphStyle *style = [[NSMutableParagraphStyle alloc] init];
+    style.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [text addAttribute:NSParagraphStyleAttributeName value:style range:NSMakeRange(0, text.length)];
+    _targetLabel.attributedStringValue = text;
+    _targetLabel.toolTip = toolTip;
 }
 
 - (void)setPageIndex:(NSInteger)pageIndex pageCount:(NSInteger)pageCount {

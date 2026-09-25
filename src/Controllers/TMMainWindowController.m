@@ -93,6 +93,12 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong, nullable) NSTimer *autoSaveTimer;
 /// 后台字数统计的代次：只有最新一次的结果写回状态栏。
 @property (nonatomic, assign) NSUInteger wordCountGeneration;
+/// 本次编译是“检测到旧辅助文件 → 自动清理”后的重试：再失败就不再清理，照常报错。
+@property (nonatomic, assign) BOOL isRetryingAfterAutoClean;
+/// 自动清理后重编仍失败的“主文件|辅助文件”：清理对它们没用，本次会话不再自动清理。
+@property (nonatomic, strong) NSMutableSet<NSString *> *unhelpfulAutoCleans;
+/// 状态栏“编译目标 · 引擎”的后台判断代次。
+@property (nonatomic, assign) NSUInteger compileTargetGeneration;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
@@ -137,6 +143,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
         _documentModel = document ?: [TMDocument documentWithDefaultTemplate];
         _currentCursorLine = 1;
         _currentCursorCol = 1;
+        _unhelpfulAutoCleans = [NSMutableSet set];
         _autoCompileEnabled = [TMPreferences shared].autoCompileEnabled;
         window.delegate = self;
 
@@ -610,6 +617,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self.autoCompileTimer invalidate];
         self.autoCompileTimer = nil;
     }
+    [self refreshCompileTarget];
 }
 
 #pragma mark - NSSplitViewDelegate (内层 代码|PDF 分栏，保证永不塌陷)
@@ -1108,6 +1116,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 #pragma mark - 编译动作与回调
 
 - (void)compileCurrentDocument {
+    // 任何一次新编译都不是“自动清理后的重试”（重试会在调用本方法之后再把标记设上）
+    self.isRetryingAfterAutoClean = NO;
     if ([self isShowingWelcome]) return;
     self.documentModel.content = self.editorTextView.string;
 
@@ -1126,6 +1136,48 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     self.lastIssues = @[];
     [self refreshIssueMarks];
     [[TMCompiler sharedCompiler] compileFileAtURL:[self mainFileURLForCompile]];
+}
+
+#pragma mark - 状态栏：编译目标与引擎
+
+static NSString *TMEngineDisplayName(NSString *engine) {
+    return @{ @"xelatex": @"XeLaTeX", @"pdflatex": @"pdfLaTeX", @"lualatex": @"LuaLaTeX" }[engine] ?: engine;
+}
+
+/// 状态栏常驻“目标文件 · 实际引擎”：与 compileFileAtURL: 的决策一致（主文件推断 → 手选 / 魔法注释 / ctex 检测）。
+- (void)refreshCompileTarget {
+    if (!self.statusBar || !self.documentModel) return;
+    NSURL *main = [self mainFileURLForCompile];
+    NSURL *currentURL = self.documentModel.fileURL;
+    BOOL isCurrent = !main || [main isEqual:currentURL];
+    BOOL isScratch = self.documentModel.isScratch;
+    NSString *editorText = isCurrent ? [self.editorTextView.string copy] : nil;
+    NSUInteger generation = ++self.compileTargetGeneration;
+    __weak typeof(self) weakSelf = self;
+
+    // 判断可能要读 .cls / 调 kpsewhich（首次约 0.2 秒），放后台，只采用最新一次的结果
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString *content = editorText ?: ([NSString stringWithContentsOfURL:main encoding:NSUTF8StringEncoding error:nil] ?: @"");
+        NSString *reason = nil;
+        NSString *engine = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content
+                                                                         directoryURL:(main ?: currentURL).URLByDeletingLastPathComponent
+                                                                               reason:&reason];
+        BOOL hasLatexmk = [TMCompiler findExecutableNamed:@"latexmk"] != nil;
+
+        NSString *fileName = (!main || isScratch) ? @"未命名文档" : main.lastPathComponent;
+        NSMutableString *tip = [NSMutableString string];
+        if (main && !isScratch) {
+            [tip appendFormat:@"编译文件：%@\n", main.path.stringByAbbreviatingWithTildeInPath];
+            if (!isCurrent) [tip appendFormat:@"（当前编辑的 %@ 不是主文件，⌘B 编译的是它）\n", currentURL.lastPathComponent];
+        }
+        [tip appendFormat:@"引擎：%@ — %@", TMEngineDisplayName(engine), reason];
+        if (hasLatexmk) [tip appendString:@"\n由 latexmk 调度（自动处理多遍编译与参考文献）"];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (weakSelf.compileTargetGeneration != generation) return;
+            [weakSelf.statusBar setCompileTargetFileName:fileName engine:TMEngineDisplayName(engine) toolTip:tip];
+        });
+    });
 }
 
 #pragma mark - 问题列表与行号槽标记
@@ -1282,7 +1334,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)compilerDidStartCompilingDocument:(NSURL *)fileURL {
     NSString *content = [NSString stringWithContentsOfURL:fileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
-    NSString *engineName = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content];
+    NSString *engineName = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content directoryURL:fileURL.URLByDeletingLastPathComponent reason:NULL];
     if ([TMCompiler findExecutableNamed:@"latexmk"]) {
         engineName = [NSString stringWithFormat:@"latexmk · %@", engineName];
     }
@@ -1297,6 +1349,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL issues:(NSArray<TMLogIssue *> *)issues {
+    self.isRetryingAfterAutoClean = NO;
     NSUInteger warnings = [TMLogParser countOfKind:TMLogIssueWarning inIssues:issues];
     NSUInteger badBoxes = [TMLogParser countOfKind:TMLogIssueBadBox inIssues:issues];
     [self.statusBar showSuccessStateWithDuration:durationSeconds warnings:warnings badBoxes:badBoxes];
@@ -1313,6 +1366,38 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log issues:(NSArray<TMLogIssue *> *)issues {
+    // 只在能从日志确认“第一个错误出在旧的辅助文件里”时自动清理并重编一次；其他失败照常报错，不多花一次编译。
+    NSString *staleFile = [TMLogParser staleAuxiliaryFileInLog:log];
+    BOOL wasRetry = self.isRetryingAfterAutoClean;
+    self.isRetryingAfterAutoClean = NO;
+    NSURL *main = [self mainFileURLForCompile];
+    NSString *key = staleFile ? [NSString stringWithFormat:@"%@|%@", main.path, staleFile] : nil;
+    NSString *hint = nil;
+    if (staleFile && wasRetry) {
+        // 从干净状态重编还在辅助文件里出错：是文档自己写坏了它，清理没用。本次会话不再为它自动清理
+        [self.unhelpfulAutoCleans addObject:key];
+        hint = [NSString stringWithFormat:@"清理后重编仍在 %@ 出错，问题出在文档本身，之后不再为它自动清理。", staleFile];
+        staleFile = nil;
+    } else if (staleFile && [self.unhelpfulAutoCleans containsObject:key]) {
+        staleFile = nil;
+    }
+    BOOL keepBibliography = staleFile && main && ![TMProject canRegenerateBibliographyForTeXFileURL:main];
+    if (staleFile && keepBibliography && [staleFile.pathExtension.lowercaseString isEqualToString:@"bbl"]) {
+        // 找不到生成它的 .bib（arXiv 源码常见）：删了就再也生成不出来，不动它
+        hint = [NSString stringWithFormat:@"错误出在 %@，但没找到能重新生成它的 .bib 文件，未自动清理（删掉就无法恢复）。", staleFile];
+        staleFile = nil;
+    }
+    if (staleFile && ![self isShowingWelcome]) {
+        [self cleanAuxiliaryFilesForMainFileKeepingBibliography:keepBibliography];
+        [self compileCurrentDocument];
+        // 在 compileCurrentDocument 之后设：重试被手动 ⌘B 顶掉时，新编译不会被误当成重试
+        self.isRetryingAfterAutoClean = YES;
+        NSString *note = [NSString stringWithFormat:@"%@ 是上次留下的旧文件，已清理辅助文件并重新编译", staleFile];
+        [self.logDrawer appendLogText:[NSString stringWithFormat:@"TeXMini：第一个错误出在 %@（旧的辅助文件），已自动清理并重新编译。\n\n", staleFile]];
+        [self.statusBar showCompilingStateWithEngine:note];
+        return;
+    }
+    if (hint) [self.logDrawer appendLogText:[NSString stringWithFormat:@"\nTeXMini：%@\n", hint]];
     [self.statusBar showErrorStateWithMessage:summary line:lineNumber];
     self.lastIssues = issues;
     [self.logDrawer setIssues:issues];
@@ -1325,6 +1410,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)compilerDidCancel {
+    self.isRetryingAfterAutoClean = NO;
     [self.statusBar showInfoMessage:@"已取消编译"];
     [self runPendingAutoCompileIfNeeded];
 }
@@ -1725,6 +1811,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     [self.outlineSidebarView updateWithRootItems:rootItems flatItems:flatList];
     [self.outlineSidebarView highlightItemForLineNumber:self.currentCursorLine];
     [self updateWordCount];
+    [self refreshCompileTarget];
 }
 
 - (void)toggleOutlineSidebar {
@@ -2016,11 +2103,16 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 /// 清理的是实际编译的主文件（用 % !TEX root 或多文件项目时不是当前文件）。
 - (void)cleanAuxiliaryFilesForMainFile {
+    [self cleanAuxiliaryFilesForMainFileKeepingBibliography:NO];
+}
+
+/// keepBibliography：保留源文件旁的 .bbl（自动清理且它无法重新生成时）。
+- (void)cleanAuxiliaryFilesForMainFileKeepingBibliography:(BOOL)keepBibliography {
     NSURL *main = [self mainFileURLForCompile];
     if (!main) return;
     // 缓存目录整个删掉；源文件旁的也清一遍（切换设置前或旧版本留下的）
     [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:main] error:nil];
-    [TMDocument cleanAuxiliaryFilesForTeXFileURL:main];
+    [TMDocument cleanAuxiliaryFilesForTeXFileURL:main keepingBibliography:keepBibliography];
     if (![main isEqual:self.documentModel.fileURL]) [self.documentModel cleanAuxiliaryFiles];
     [self.outlineSidebarView.fileBrowserView reload];
 }

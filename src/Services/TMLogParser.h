@@ -24,6 +24,10 @@ typedef NS_ENUM(NSInteger, TMLogIssueKind) {
 
 + (NSArray<TMLogIssue *> *)issuesFromLog:(NSString *)log;
 + (nullable TMLogIssue *)firstErrorInIssues:(NSArray<TMLogIssue *> *)issues;
+/// 第一个错误出在编译生成的辅助文件（.aux / .bbl / .toc 等）里时，返回该文件名（如 "main.aux"）；否则 nil。
+/// 这类错误是上次中断或换了宏包 / 文献样式后的旧文件造成的，清理后重编即可；
+/// 第一个错误在正文里时辅助文件的报错只是连带，不算。
++ (nullable NSString *)staleAuxiliaryFileInLog:(NSString *)log;
 + (NSUInteger)countOfKind:(TMLogIssueKind)kind inIssues:(NSArray<TMLogIssue *> *)issues;
 
 @end

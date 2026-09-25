@@ -15,6 +15,11 @@
 }
 @end
 
+@interface TMPDFView ()
+/// 当前文档加载时 PDF 文件的修改时间：判断同一份 PDF 是否重新生成过。
+@property (nonatomic, strong, nullable) NSDate *loadedModificationDate;
+@end
+
 @implementation TMPDFView {
     TMHighlightOverlayView *_currentOverlay;
 }
@@ -123,15 +128,29 @@
     return [super validateMenuItem:menuItem];
 }
 
+static NSDate *TMFileModificationDate(NSURL *url) {
+    return [[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil][NSFileModificationDate];
+}
+
 - (void)loadPDFFromURL:(NSURL *)url {
+    // 同一项目里切换 .tex 时预览的往往是同一份 main.pdf：没重新生成就不动它（避免闪烁、不跳回第一页），
+    // 生成过就按保留视口的方式刷新
+    if (self.document && [url.URLByStandardizingPath isEqual:self.currentPDFURL.URLByStandardizingPath]) {
+        NSDate *modified = TMFileModificationDate(url);
+        if (modified && [modified isEqualToDate:self.loadedModificationDate]) return;
+        [self loadPDFFromURL:url preservingViewport:YES];
+        return;
+    }
     [self loadPDFFromURL:url preservingViewport:NO];
 }
 
 - (void)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve {
+    NSDate *modified = TMFileModificationDate(url);
     PDFDocument *newDoc = [[PDFDocument alloc] initWithURL:url];
     if (!newDoc) return;
 
     self.currentPDFURL = url;
+    self.loadedModificationDate = modified;
 
     if (!preserve || !self.document) {
         self.document = newDoc;

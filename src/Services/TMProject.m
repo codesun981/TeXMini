@@ -1,5 +1,6 @@
 #import "TMProject.h"
 #import "TMMagicComments.h"
+#import "TMLaTeXScanner.h"
 
 @implementation TMFileNode
 @end
@@ -178,6 +179,31 @@
         }
     }
     return candidates.count == 1 ? candidates.firstObject : nil;
+}
+
++ (BOOL)canRegenerateBibliographyForTeXFileURL:(NSURL *)texURL {
+    NSString *content = [NSString stringWithContentsOfURL:texURL encoding:NSUTF8StringEncoding error:nil];
+    if (content.length == 0) return NO;
+    static NSRegularExpression *re;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:@"\\\\(bibliography|addbibresource)\\s*(?:\\[[^\\]]*\\])?\\s*\\{([^}]*)\\}"
+                                                       options:0 error:nil];
+    });
+    TMLaTeXScanResult *scan = [TMLaTeXScanner scanString:content];
+    NSURL *dir = texURL.URLByDeletingLastPathComponent;
+    for (NSTextCheckingResult *m in [re matchesInString:content options:0 range:NSMakeRange(0, content.length)]) {
+        if ([scan isIgnorableAtIndex:m.range.location]) continue;   // 注释掉的不算
+        BOOL bibtex = [[content substringWithRange:[m rangeAtIndex:1]] isEqualToString:@"bibliography"];
+        for (NSString *part in [[content substringWithRange:[m rangeAtIndex:2]] componentsSeparatedByString:@","]) {
+            NSString *name = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (name.length == 0) continue;
+            if (bibtex && ![name.pathExtension.lowercaseString isEqualToString:@"bib"]) name = [name stringByAppendingPathExtension:@"bib"];
+            NSString *path = name.isAbsolutePath ? name : [dir.path stringByAppendingPathComponent:name];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:path]) return YES;
+        }
+    }
+    return NO;
 }
 
 + (nullable NSURL *)guessMainFileInDirectory:(NSURL *)directoryURL {

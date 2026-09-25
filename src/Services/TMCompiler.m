@@ -50,6 +50,128 @@ static NSString *TMStripTeXComments(NSString *content) {
     return result;
 }
 
+/// 这些关键词出现（去掉注释后）即需要 XeLaTeX；fontspec 的字体命令可能经 unicode-math 等间接加载。
+static BOOL TMNeedsXeTeXKeyword(NSString *code) {
+    return [code containsString:@"ctex"] || [code containsString:@"xeCJK"] || [code containsString:@"fontspec"] ||
+           [code containsString:@"\\setmainfont"] || [code containsString:@"\\setCJKmainfont"];
+}
+
+static BOOL TMContainsCJK(NSString *code) {
+    static NSCharacterSet *cjk;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableCharacterSet *set = [NSMutableCharacterSet characterSetWithRange:NSMakeRange(0x4E00, 0x9FFF - 0x4E00 + 1)]; // 基本汉字
+        [set addCharactersInRange:NSMakeRange(0x3400, 0x4DBF - 0x3400 + 1)];  // 扩展 A
+        [set addCharactersInRange:NSMakeRange(0x3000, 0x303F - 0x3000 + 1)];  // 中文标点
+        [set addCharactersInRange:NSMakeRange(0xFF00, 0xFFEF - 0xFF00 + 1)];  // 全角字符
+        cjk = [set copy];
+    });
+    return [code rangeOfCharacterFromSet:cjk].location != NSNotFound;
+}
+
+/// 代码里 \documentclass / \LoadClass（.cls）和 \usepackage / \RequirePackage（.sty）引用的名字，形如 "thuthesis.cls"。
+static NSArray<NSString *> *TMDependencyFileNames(NSString *code) {
+    static NSRegularExpression *re;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        re = [NSRegularExpression regularExpressionWithPattern:
+              @"\\\\(documentclass|LoadClass|usepackage|RequirePackage)\\s*(?:\\[[^\\]]*\\])?\\s*\\{([^}]*)\\}" options:0 error:nil];
+    });
+    NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSet];
+    [re enumerateMatchesInString:code options:0 range:NSMakeRange(0, code.length)
+                      usingBlock:^(NSTextCheckingResult *m, NSMatchingFlags flags, BOOL *stop) {
+        NSString *kind = [code substringWithRange:[m rangeAtIndex:1]];
+        NSString *ext = [kind hasSuffix:@"Class"] || [kind isEqualToString:@"documentclass"] ? @"cls" : @"sty";
+        for (NSString *part in [[code substringWithRange:[m rangeAtIndex:2]] componentsSeparatedByString:@","]) {
+            NSString *name = [part stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (name.length) [names addObject:[name stringByAppendingPathExtension:ext]];
+        }
+    }];
+    return names.array;
+}
+
+/// 标准文档类：一定不含 ctex，不必去 texmf 里找。
+static BOOL TMIsStandardClass(NSString *fileName) {
+    static NSSet *standard;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        standard = [NSSet setWithArray:@[@"article", @"report", @"book", @"letter", @"slides", @"minimal", @"proc",
+                                         @"amsart", @"amsbook", @"amsproc", @"beamer", @"memoir", @"standalone",
+                                         @"scrartcl", @"scrreprt", @"scrbook", @"scrlttr2", @"IEEEtran", @"llncs",
+                                         @"elsarticle", @"acmart", @"revtex4-1", @"revtex4-2", @"svjour3", @"moderncv"]];
+    });
+    return [standard containsObject:fileName.stringByDeletingPathExtension];
+}
+
+/// 装在 TeX 发行版里的文件路径（kpsewhich）；结果按文件名缓存，同一会话只查一次。
+static NSString *TMKpsewhich(NSString *fileName) {
+    static NSMutableDictionary<NSString *, id> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSMutableDictionary dictionary]; });
+    @synchronized (cache) {
+        id hit = cache[fileName];
+        if (hit) return hit == [NSNull null] ? nil : hit;
+    }
+    NSString *path = nil;
+    NSString *kpsewhich = [TMCompiler findExecutableNamed:@"kpsewhich"];
+    if (kpsewhich) {
+        NSTask *task = [[NSTask alloc] init];
+        task.executableURL = [NSURL fileURLWithPath:kpsewhich];
+        task.arguments = @[fileName];
+        NSPipe *pipe = [NSPipe pipe];
+        task.standardOutput = pipe;
+        task.standardError = [NSFileHandle fileHandleWithNullDevice];
+        if ([task launchAndReturnError:nil]) {
+            NSData *data = [pipe.fileHandleForReading readDataToEndOfFile];
+            [task waitUntilExit];
+            NSString *out = [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]
+                             stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (task.terminationStatus == 0 && out.length) path = out;
+        }
+    }
+    @synchronized (cache) { cache[fileName] = path ?: [NSNull null]; }
+    return path;
+}
+
+/// 读取依赖文件（去掉注释）；按修改时间缓存，文件没变不重复读盘（状态栏会反复询问）。
+static NSString *TMDependencyCode(NSString *path) {
+    static NSCache<NSString *, NSArray *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; });
+    NSDate *modified = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil][NSFileModificationDate];
+    if (!modified) return nil;
+    NSArray *entry = [cache objectForKey:path];
+    if (entry && [entry[0] isEqualToDate:modified]) return entry[1];
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
+                  ?: [NSString stringWithContentsOfFile:path encoding:NSISOLatin1StringEncoding error:nil];
+    if (!text) return nil;
+    NSString *code = TMStripTeXComments(text);
+    [cache setObject:@[modified, code] forKey:path];
+    return code;
+}
+
+/// 顺着依赖找需要 XeLaTeX 的 .cls / .sty，返回第一个命中的文件名；depth 为剩余层数。
+/// 先找 directoryURL（项目目录）；找不到的非标准文档类再问 kpsewhich（宏包太多，不逐个查）。
+static NSString *TMDependencyNeedingXeTeX(NSString *code, NSURL *directoryURL, NSUInteger depth) {
+    if (depth == 0) return nil;
+    for (NSString *fileName in TMDependencyFileNames(code)) {
+        NSString *path = nil;
+        if (directoryURL) {
+            NSString *local = [directoryURL.path stringByAppendingPathComponent:fileName];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:local]) path = local;
+        }
+        if (!path && [fileName.pathExtension isEqualToString:@"cls"] && !TMIsStandardClass(fileName)) {
+            path = TMKpsewhich(fileName);
+        }
+        NSString *dependency = path ? TMDependencyCode(path) : nil;
+        if (!dependency) continue;
+        if (TMNeedsXeTeXKeyword(dependency)) return fileName;
+        NSString *nested = TMDependencyNeedingXeTeX(dependency, path.stringByDeletingLastPathComponent.length ? [NSURL fileURLWithPath:path.stringByDeletingLastPathComponent] : directoryURL, depth - 1);
+        if (nested) return [NSString stringWithFormat:@"%@ → %@", fileName, nested];
+    }
+    return nil;
+}
+
 /// 先结束子孙进程再结束自身（SIGTERM）。
 static void TMTerminateProcessTree(pid_t pid) {
     if (pid <= 0) return;
@@ -124,20 +246,54 @@ static void TMTerminateProcessTree(pid_t pid) {
 
 /// 返回 xelatex / pdflatex / lualatex 之一。
 - (NSString *)effectiveEngineNameForContent:(NSString *)content {
-    if (self.engine == TMTeXEngineXeLaTeX) return @"xelatex";
-    if (self.engine == TMTeXEnginePDFLaTeX) return @"pdflatex";
-    if (self.engine == TMTeXEngineLuaLaTeX) return @"lualatex";
+    return [self effectiveEngineNameForContent:content directoryURL:nil reason:NULL];
+}
 
-    NSString *program = [[TMMagicComments magicCommentsInString:content ?: @""][@"program"] lowercaseString];
+- (NSString *)effectiveEngineNameForContent:(NSString *)content
+                               directoryURL:(nullable NSURL *)directoryURL
+                                     reason:(NSString **)reason {
+    NSString *why = nil;
+    NSString *engine = [self decideEngineForContent:content ?: @"" directoryURL:directoryURL reason:&why];
+    if (reason) *reason = why;
+    return engine;
+}
+
+- (NSString *)decideEngineForContent:(NSString *)content directoryURL:(nullable NSURL *)directoryURL reason:(NSString **)reason {
+    if (self.engine != TMTeXEngineLatexmk) {
+        *reason = @"手动选择的引擎";
+        if (self.engine == TMTeXEngineXeLaTeX) return @"xelatex";
+        if (self.engine == TMTeXEngineLuaLaTeX) return @"lualatex";
+        return @"pdflatex";
+    }
+
+    NSString *program = [[TMMagicComments magicCommentsInString:content][@"program"] lowercaseString];
     if ([program isEqualToString:@"xelatex"] || [program isEqualToString:@"pdflatex"] || [program isEqualToString:@"lualatex"]) {
+        *reason = @"文件里的魔法注释 % !TEX program 指定";
         return program;
     }
-    // ctex / xeCJK / fontspec，或直接用了 fontspec 的字体命令（可能经 unicode-math 等间接加载），都需要 XeLaTeX
+
     // 先去掉注释：注释掉的 %\usepackage{ctex} 不应让整篇改用更慢的 XeLaTeX
-    content = TMStripTeXComments(content ?: @"");
-    BOOL needsXeTeX = [content containsString:@"ctex"] || [content containsString:@"xeCJK"] || [content containsString:@"fontspec"] ||
-                      [content containsString:@"\\setmainfont"] || [content containsString:@"\\setCJKmainfont"];
-    return needsXeTeX ? @"xelatex" : @"pdflatex";
+    NSString *code = TMStripTeXComments(content);
+    if (TMNeedsXeTeXKeyword(code)) {
+        *reason = @"自动：检测到 ctex / xeCJK / fontspec 等需要 XeLaTeX 的宏包";
+        return @"xelatex";
+    }
+
+    // 中文模板常把 ctex 藏在 .cls 里，正文只有一行 \documentclass{thuthesis}
+    NSString *culprit = TMDependencyNeedingXeTeX(code, directoryURL, 2);
+    if (culprit) {
+        *reason = [NSString stringWithFormat:@"自动：%@ 里加载了 ctex / xeCJK / fontspec 等需要 XeLaTeX 的宏包", culprit];
+        return @"xelatex";
+    }
+
+    // 有汉字但没用 pdfLaTeX 的 CJK 宏包：pdfLaTeX 基本编不出中文
+    if (TMContainsCJK(code) && ![code containsString:@"{CJK"] && ![code containsString:@"CJKutf8"]) {
+        *reason = @"自动：正文含中文字符";
+        return @"xelatex";
+    }
+
+    *reason = @"自动：未检测到中文或字体宏包，使用 pdfLaTeX";
+    return @"pdflatex";
 }
 
 + (NSString *)latexmkFlagForEngineName:(NSString *)name {
@@ -216,7 +372,7 @@ static void TMTerminateProcessTree(pid_t pid) {
     }
 
     // 2. 决定引擎与命令行
-    NSString *engineName = [self effectiveEngineNameForContent:content];
+    NSString *engineName = [self effectiveEngineNameForContent:content directoryURL:texFileURL.URLByDeletingLastPathComponent reason:NULL];
     NSString *latexmkPath = [TMCompiler findExecutableNamed:@"latexmk"];
     NSString *enginePath = [TMCompiler findExecutableNamed:engineName];
 

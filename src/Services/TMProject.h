@@ -32,6 +32,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 /// 在目录顶层寻找含 \documentclass 的 .tex 文件（用于“打开文件夹”）。
 /// 多个候选时优先 main.tex / thesis.tex / paper.tex 等常见名字，再退回引用其他文件最多的那个。
+/// 主文件的 .bbl 能否重新生成：主文件里（注释外）的 \bibliography{…} / \addbibresource{…} 指向的 .bib 至少有一个存在。
+/// 从 arXiv 下载的源码常常只有 .bbl 没有 .bib，这种 .bbl 删掉就再也生成不出来。
++ (BOOL)canRegenerateBibliographyForTeXFileURL:(NSURL *)texURL;
 + (nullable NSURL *)guessMainFileInDirectory:(NSURL *)directoryURL;
 
 @end
