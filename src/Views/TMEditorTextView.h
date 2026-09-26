@@ -29,6 +29,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)insertSnippet:(NSString *)snippet atLocation:(NSUInteger)location cursorOffset:(NSUInteger)cursorOffset;
 /// 用 newText 整体替换内容，但只改动真正不同的那一段：一步可撤销，光标尽量留在原处。
 - (void)replaceTextWith:(NSString *)newText actionName:(NSString *)actionName;
+/// 可撤销地把 range 换成 replacement，之后选中 selection（替换后的坐标）。
+- (void)replaceRange:(NSRange)range withText:(NSString *)replacement selection:(NSRange)selection actionName:(NSString *)actionName;
 
 /// 编辑器字号（9–30），设置后立即重排并重新着色。
 @property (nonatomic, assign) CGFloat editorFontSize;

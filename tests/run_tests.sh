@@ -14,6 +14,7 @@ clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     src/Services/TMOutlineParser.m \
     src/Services/TMLaTeXScanner.m \
     src/Services/TMMarkdownScanner.m \
+    src/Services/TMFormatActions.m \
     src/Services/TMEditActions.m \
     src/Services/TMMagicComments.m \
     src/Services/TMLogParser.m \

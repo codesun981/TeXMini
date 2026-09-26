@@ -47,7 +47,7 @@
 @"  \\left( \\sum_{k=1}^n a_k b_k \\right)^2 \\le \\left( \\sum_{k=1}^n a_k^2 \\right) \\left( \\sum_{k=1}^n b_k^2 \\right)\n"
 @"\\end{equation}\n\n"
 @"\\section{操作提示}\n"
-@"1. 按 \\textbf{⌘B} 一键保存并自动编译，右侧即可获得高清 PDF 预览；\n"
+@"1. 按 \\textbf{⌘↩} 一键保存并自动编译，右侧即可获得高清 PDF 预览；\n"
 @"2. 在右侧 PDF 任意位置 \\textbf{双击}（或 ⌘+点击），左侧源码将瞬间跳转至对应代码行；\n"
 @"3. 在左侧代码任意位置 \\textbf{双击}（或 ⌘+点击、按 \\textbf{⌘J}），右侧 PDF 对应段落将闪烁定位高亮；点击左侧大纲章节同样会同步定位。\n\n"
 @"\\end{document}\n";

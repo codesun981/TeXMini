@@ -15,6 +15,7 @@
 #import "TMFontSettings.h"
 #import "TMFontCatalog.h"
 #import "TMMarkdownScanner.h"
+#import "TMFormatActions.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -943,6 +944,168 @@ TM_TEST(test_markdown_lists_quotes_links_rules) {
     TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionLink, @"[文档](https://a.b/c_d)"));
     NSString *emphasisPrefix = [NSString stringWithFormat:@"%ld:", (long)TMMarkdownRegionEmphasis];
     for (NSString *x in r) TM_ASSERT_TRUE(![x hasPrefix:emphasisPrefix]);
+}
+
+#pragma mark - TMFormatActions
+
+/// 应用一次格式编辑，返回新文本；光标 / 选区写进 *sel
+static NSString *TMApplyFormat(NSString *text, TMFormatEdit *edit, NSRange *sel) {
+    if (!edit) return text;
+    NSString *out = [text stringByReplacingCharactersInRange:edit.range withString:edit.replacement];
+    if (sel) *sel = edit.selection;
+    return out;
+}
+
+/// 文本里的 | 表示光标
+static NSString *TMStripCaret(NSString *s, NSRange *sel) {
+    NSRange bar = [s rangeOfString:@"|"];
+    *sel = NSMakeRange(bar.location, 0);
+    return [s stringByReplacingCharactersInRange:bar withString:@""];
+}
+
+static NSString *TMWithCaret(NSString *s, NSRange sel) {
+    return [s stringByReplacingCharactersInRange:NSMakeRange(sel.location, 0) withString:@"|"];
+}
+
+static NSString *TMParagraph(NSString *input, TMParagraphStyle style, BOOL chapters) {
+    NSRange sel;
+    NSString *text = TMStripCaret(input, &sel);
+    TMFormatEdit *edit = [TMFormatActions editForParagraphStyle:style selection:sel inText:text markdown:NO usesChapters:chapters];
+    NSString *out = TMApplyFormat(text, edit, &sel);
+    return TMWithCaret(out, sel);
+}
+
+TM_TEST(test_format_heading_levels_follow_document_class) {
+    TM_ASSERT_TRUE(![TMFormatActions usesChaptersForMainContent:@"\\documentclass{ctexart}\n" currentContent:@""]);
+    TM_ASSERT_TRUE([TMFormatActions usesChaptersForMainContent:@"\\documentclass[12pt]{ctexbook}\n" currentContent:@""]);
+    TM_ASSERT_TRUE([TMFormatActions usesChaptersForMainContent:@"\\documentclass{thuthesis}\n" currentContent:@""]);
+    TM_ASSERT_TRUE([TMFormatActions usesChaptersForMainContent:nil currentContent:@"\\chapter{引言}\n"]);
+    TM_ASSERT_EQ_STR(TMParagraph(@"引|言\n", TMParagraphStyleHeading1, NO), @"\\section{引|言}\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"引|言\n", TMParagraphStyleHeading1, YES), @"\\chapter{引|言}\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"方法|\n", TMParagraphStyleHeading3, NO), @"\\subsubsection{方法|}\n");
+}
+
+TM_TEST(test_format_heading_toggle_and_change) {
+    // 再按一次取消；换级别保留 * 和 \label
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\section{引|言}\n", TMParagraphStyleHeading1, NO), @"引|言\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\section*{引言|}\\label{s}\n", TMParagraphStyleHeading2, NO), @"\\subsection*{引言|}\\label{s}\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\subsection{A|}\n", TMParagraphStyleBody, NO), @"A|\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"|\n", TMParagraphStyleHeading1, NO), @"\\section{|}\n");
+    TM_ASSERT_TRUE([TMFormatActions editForParagraphStyle:TMParagraphStyleBody selection:NSMakeRange(0, 0) inText:@"正文\n" markdown:NO usesChapters:NO] == nil);
+}
+
+TM_TEST(test_format_paragraph_style_detection) {
+    NSString *text = @"\\subsection{A}\n\\begin{enumerate}\n  \\item x\n\\end{enumerate}\n\\begin{quote}\nq\n\\end{quote}\n正文\n";
+    TM_ASSERT_EQ_INT([TMFormatActions paragraphStyleAtLocation:2 inText:text markdown:NO usesChapters:NO], TMParagraphStyleHeading2);
+    NSUInteger item = [text rangeOfString:@"x"].location;
+    TM_ASSERT_EQ_INT([TMFormatActions paragraphStyleAtLocation:item inText:text markdown:NO usesChapters:NO], TMParagraphStyleNumberedList);
+    NSUInteger q = [text rangeOfString:@"q\n"].location;
+    TM_ASSERT_EQ_INT([TMFormatActions paragraphStyleAtLocation:q inText:text markdown:NO usesChapters:NO], TMParagraphStyleQuote);
+    TM_ASSERT_EQ_INT([TMFormatActions paragraphStyleAtLocation:text.length - 2 inText:text markdown:NO usesChapters:NO], TMParagraphStyleBody);
+    // 注释掉的 \begin{itemize} 不算
+    TM_ASSERT_EQ_INT([TMFormatActions paragraphStyleAtLocation:20 inText:@"% \\begin{itemize}\nabc\n" markdown:NO usesChapters:NO], TMParagraphStyleBody);
+}
+
+TM_TEST(test_format_lists_wrap_switch_unwrap) {
+    TM_ASSERT_EQ_STR(TMParagraph(@"第一点|\n", TMParagraphStyleBulletList, NO),
+                     @"\\begin{itemize}\n  \\item 第一点|\n\\end{itemize}\n");
+    NSRange sel;
+    NSString *text = @"甲\n乙\n";
+    TMFormatEdit *edit = [TMFormatActions editForParagraphStyle:TMParagraphStyleNumberedList selection:NSMakeRange(0, text.length) inText:text markdown:NO usesChapters:NO];
+    NSString *out = TMApplyFormat(text, edit, &sel);
+    TM_ASSERT_EQ_STR(TMWithCaret(out, sel), @"\\begin{enumerate}\n  \\item 甲\n  \\item 乙|\n\\end{enumerate}\n");
+    // 无序 ↔ 有序
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\begin{itemize}\n  \\item a|\n\\end{itemize}\n", TMParagraphStyleNumberedList, NO),
+                     @"\\begin{enumerate}\n  \\item a|\n\\end{enumerate}\n");
+    // 同一种再按一次：变回段落
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\begin{itemize}\n  \\item a|\n  \\item b\n\\end{itemize}\n", TMParagraphStyleBulletList, NO),
+                     @"|a\n\nb\n");
+}
+
+TM_TEST(test_format_list_item_to_heading_splits_list) {
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\begin{itemize}\n  \\item a\n  \\item b|\n  \\item c\n\\end{itemize}\n", TMParagraphStyleBody, NO),
+                     @"\\begin{itemize}\n  \\item a\n\\end{itemize}\n\nb|\n\n\\begin{itemize}\n  \\item c\n\\end{itemize}\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\begin{itemize}\n  \\item |a\n\\end{itemize}\n", TMParagraphStyleHeading1, NO),
+                     @"\\section{|a}\n");
+}
+
+TM_TEST(test_format_quote_wrap_unwrap) {
+    TM_ASSERT_EQ_STR(TMParagraph(@"名言|\n", TMParagraphStyleQuote, NO), @"\\begin{quote}\n名言|\n\\end{quote}\n");
+    TM_ASSERT_EQ_STR(TMParagraph(@"\\begin{quote}\n名言|\n\\end{quote}\n", TMParagraphStyleQuote, NO), @"名言|\n");
+}
+
+TM_TEST(test_format_markdown_paragraph_styles) {
+    NSRange sel;
+    NSString *text = TMStripCaret(@"标|题\n", &sel);
+    NSString *out = TMApplyFormat(text, [TMFormatActions editForParagraphStyle:TMParagraphStyleHeading2 selection:sel inText:text markdown:YES usesChapters:NO], &sel);
+    TM_ASSERT_EQ_STR(TMWithCaret(out, sel), @"## 标|题\n");
+    out = TMApplyFormat(out, [TMFormatActions editForParagraphStyle:TMParagraphStyleHeading2 selection:sel inText:out markdown:YES usesChapters:NO], &sel);
+    TM_ASSERT_EQ_STR(TMWithCaret(out, sel), @"标|题\n");
+    text = @"a\nb\n";
+    out = TMApplyFormat(text, [TMFormatActions editForParagraphStyle:TMParagraphStyleNumberedList selection:NSMakeRange(0, 3) inText:text markdown:YES usesChapters:NO], &sel);
+    TM_ASSERT_EQ_STR(out, @"1. a\n2. b\n");
+    TM_ASSERT_EQ_INT([TMFormatActions paragraphStyleAtLocation:0 inText:@"> 引\n" markdown:YES usesChapters:NO], TMParagraphStyleQuote);
+}
+
+static NSString *TMInline(NSString *input, TMInlineStyle style, BOOL markdown) {
+    // [ ] 表示选区，| 表示光标
+    NSRange sel;
+    NSString *text;
+    NSRange open = [input rangeOfString:@"["];
+    if (open.location != NSNotFound) {
+        text = [input stringByReplacingCharactersInRange:open withString:@""];
+        NSRange close = [text rangeOfString:@"]"];
+        text = [text stringByReplacingCharactersInRange:close withString:@""];
+        sel = NSMakeRange(open.location, close.location - open.location);
+    } else {
+        text = TMStripCaret(input, &sel);
+    }
+    NSString *out = TMApplyFormat(text, [TMFormatActions editForInlineStyle:style selection:sel inText:text markdown:markdown], &sel);
+    if (sel.length == 0) return TMWithCaret(out, sel);
+    return [NSString stringWithFormat:@"%@[%@]%@", [out substringToIndex:sel.location], [out substringWithRange:sel], [out substringFromIndex:NSMaxRange(sel)]];
+}
+
+TM_TEST(test_format_inline_styles) {
+    TM_ASSERT_EQ_STR(TMInline(@"很[重要]的", TMInlineStyleBold, NO), @"很\\textbf{[重要]}的");
+    TM_ASSERT_EQ_STR(TMInline(@"很\\textbf{[重要]}的", TMInlineStyleBold, NO), @"很[重要]的");
+    TM_ASSERT_EQ_STR(TMInline(@"很[\\textbf{重要}]的", TMInlineStyleBold, NO), @"很[重要]的");
+    TM_ASSERT_EQ_STR(TMInline(@"a|b", TMInlineStyleBold, NO), @"a\\textbf{|}b");
+    TM_ASSERT_EQ_STR(TMInline(@"x \\emph{重|要} y", TMInlineStyleItalic, NO), @"x 重|要 y");
+    TM_ASSERT_EQ_STR(TMInline(@"x \\textbf{a {b} c|} y", TMInlineStyleBold, NO), @"x a {b} c| y");
+    TM_ASSERT_EQ_STR(TMInline(@"[词]", TMInlineStyleUnderline, NO), @"\\underline{[词]}");
+    TM_ASSERT_EQ_STR(TMInline(@"[词]", TMInlineStyleBold, YES), @"**[词]**");
+    TM_ASSERT_EQ_STR(TMInline(@"**[词]**", TMInlineStyleBold, YES), @"[词]");
+}
+
+TM_TEST(test_format_insertions) {
+    NSRange sel;
+    NSString *text = @"见官网";
+    TMFormatEdit *edit = [TMFormatActions editForInsertion:TMFormatInsertLink selection:NSMakeRange(1, 2) inText:text markdown:NO];
+    TM_ASSERT_EQ_STR(TMApplyFormat(text, edit, &sel), @"见\\href{https://}{官网}");
+    TM_ASSERT_EQ_STR(edit.requiredPackage, @"hyperref");
+    TM_ASSERT_EQ_INT(sel.length, 8);
+
+    text = TMStripCaret(@"前文|\n后文\n", &sel);
+    NSString *out = TMApplyFormat(text, [TMFormatActions editForInsertion:TMFormatInsertDisplayMath selection:sel inText:text markdown:NO], &sel);
+    TM_ASSERT_EQ_STR(TMWithCaret(out, sel), @"前文\n\\begin{equation}\n  |\n\\end{equation}\n后文\n");
+
+    text = TMStripCaret(@"|\n", &sel);
+    out = TMApplyFormat(text, [TMFormatActions editForInsertion:TMFormatInsertInlineMath selection:sel inText:text markdown:NO], &sel);
+    TM_ASSERT_EQ_STR(TMWithCaret(out, sel), @"$|$\n");
+
+    text = TMStripCaret(@"|", &sel);
+    out = TMApplyFormat(text, [TMFormatActions editForInsertion:TMFormatInsertTable selection:sel inText:text markdown:NO], &sel);
+    TM_ASSERT_TRUE([out hasPrefix:@"\\begin{table}[htbp]\n  \\centering\n  \\caption{}"]);
+    TM_ASSERT_TRUE([out hasSuffix:@"\\end{table}"]);
+    TM_ASSERT_EQ_INT(sel.location, [out rangeOfString:@"\\caption{"].location + 9);
+}
+
+TM_TEST(test_format_usepackage_location) {
+    NSString *doc = @"\\documentclass{article}\n\\usepackage{graphicx}\n\\begin{document}\nx\n\\end{document}\n";
+    TM_ASSERT_EQ_INT([TMFormatActions usepackageInsertionLocationForPackage:@"graphicx" inContent:doc], NSNotFound);
+    TM_ASSERT_EQ_INT([TMFormatActions usepackageInsertionLocationForPackage:@"xcolor" inContent:doc], 24);
+    TM_ASSERT_EQ_INT([TMFormatActions usepackageInsertionLocationForPackage:@"hyperref" inContent:doc], [doc rangeOfString:@"\\begin{document}"].location);
+    TM_ASSERT_EQ_INT([TMFormatActions usepackageInsertionLocationForPackage:@"hyperref" inContent:@"正文"], NSNotFound);
 }
 
 #pragma mark - Runner

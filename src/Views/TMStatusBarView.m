@@ -9,6 +9,7 @@
     NSButton *_errorButton;
     NSButton *_logButton;
     NSPopUpButton *_enginePopup;
+    NSPopUpButton *_stylePopup;
     NSInteger _lastErrorLine;
     NSInteger _cursorLine;
     NSInteger _cursorColumn;
@@ -43,6 +44,15 @@
     _cursorLabel.textColor = [NSColor secondaryLabelColor];
     _cursorLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [self addSubview:_cursorLabel];
+
+    _stylePopup = [[NSPopUpButton alloc] initWithFrame:NSZeroRect pullsDown:NO];
+    _stylePopup.bezelStyle = NSBezelStyleInline;
+    _stylePopup.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
+    _stylePopup.target = self;
+    _stylePopup.action = @selector(styleChanged:);
+    _stylePopup.hidden = YES;
+    _stylePopup.translatesAutoresizingMaskIntoConstraints = NO;
+    [self addSubview:_stylePopup];
 
     _spinner = [[NSProgressIndicator alloc] init];
     _spinner.style = NSProgressIndicatorStyleSpinning;
@@ -99,7 +109,10 @@
         [_cursorLabel.leadingAnchor constraintEqualToAnchor:self.leadingAnchor constant:12],
         [_cursorLabel.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
 
-        [_spinner.leadingAnchor constraintEqualToAnchor:_cursorLabel.trailingAnchor constant:16],
+        [_stylePopup.leadingAnchor constraintEqualToAnchor:_cursorLabel.trailingAnchor constant:10],
+        [_stylePopup.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
+
+        [_spinner.leadingAnchor constraintEqualToAnchor:_stylePopup.trailingAnchor constant:12],
         [_spinner.centerYAnchor constraintEqualToAnchor:self.centerYAnchor],
         [_spinner.widthAnchor constraintEqualToConstant:14],
         [_spinner.heightAnchor constraintEqualToConstant:14],
@@ -211,6 +224,23 @@
 
 - (void)setSelectedEngine:(TMTeXEngine)engine {
     [_enginePopup selectItemAtIndex:(NSInteger)engine];
+}
+
+- (void)setParagraphStyleTitles:(NSArray<NSString *> *)titles {
+    [_stylePopup removeAllItems];
+    [_stylePopup addItemsWithTitles:titles];
+}
+
+- (void)setParagraphStyle:(NSInteger)style {
+    // 负数：当前文件没有段落样式（.bib / .txt），收起样式框
+    _stylePopup.hidden = style < 0 || style >= _stylePopup.numberOfItems;
+    if (!_stylePopup.hidden) [_stylePopup selectItemAtIndex:style];
+}
+
+- (void)styleChanged:(id)sender {
+    if ([self.delegate respondsToSelector:@selector(statusBarDidSelectParagraphStyle:)]) {
+        [self.delegate statusBarDidSelectParagraphStyle:_stylePopup.indexOfSelectedItem];
+    }
 }
 
 - (void)engineChanged:(id)sender {

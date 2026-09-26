@@ -1,5 +1,6 @@
 #import <Cocoa/Cocoa.h>
 #import "TMDocument.h"
+#import "TMFormatActions.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -71,6 +72,19 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)showDocumentFontsSheet;
 /// 从 TMPreferences 重新应用全部偏好（字体、换行、引擎、编译参数、自动编译）。
 - (void)applyPreferences;
+
+#pragma mark - 格式菜单
+
+/// 当前文件能不能用「格式」菜单（LaTeX 与 Markdown 可以，.bib / .txt 不行）。
+- (BOOL)canApplyFormat;
+- (BOOL)isEditingMarkdown;
+/// 光标所在段落的样式（菜单打勾用）。
+- (TMParagraphStyle)currentParagraphStyle;
+- (void)applyParagraphStyle:(TMParagraphStyle)style;
+- (void)applyInlineStyle:(TMInlineStyle)style;
+- (void)insertFormat:(TMFormatInsertion)kind;
+/// 格式 › 插入 › 图片…：选图片后和拖进编辑器一样处理。
+- (void)insertImageFromPanel;
 
 @end
 

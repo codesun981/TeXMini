@@ -146,11 +146,17 @@
     editMenuItem.submenu = editMenu;
     [mainMenu addItem:editMenuItem];
 
+    // 3½. 格式菜单：替用户写 \section{…} \textbf{…}，代码模式下也能用
+    NSMenuItem *formatMenuItem = [[NSMenuItem alloc] initWithTitle:@"格式" action:nil keyEquivalent:@""];
+    formatMenuItem.submenu = [self buildFormatMenu];
+    [mainMenu addItem:formatMenuItem];
+
     // 4. 编译菜单 (TeX / Compile)
     NSMenuItem *compileMenuItem = [[NSMenuItem alloc] init];
     NSMenu *compileMenu = [[NSMenu alloc] initWithTitle:@"编译"];
-    [compileMenu addItemWithTitle:@"保存并编译" action:@selector(compileDocumentAction:) keyEquivalent:@"b"];
-    NSMenuItem *cleanBuild = [compileMenu addItemWithTitle:@"清理并重新编译" action:@selector(cleanAndRebuildAction:) keyEquivalent:@"b"];
+    // ⌘B 让给加粗（和 Word、Pages、Overleaf 一致），编译用 ⌘↩（Overleaf 也是）
+    [compileMenu addItemWithTitle:@"保存并编译" action:@selector(compileDocumentAction:) keyEquivalent:@"\r"];
+    NSMenuItem *cleanBuild = [compileMenu addItemWithTitle:@"清理并重新编译" action:@selector(cleanAndRebuildAction:) keyEquivalent:@"\r"];
     cleanBuild.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [compileMenu addItemWithTitle:@"取消编译" action:@selector(cancelCompileAction:) keyEquivalent:@"."];
     [compileMenu addItemWithTitle:@"自动编译（停止输入后）" action:@selector(toggleAutoCompileAction:) keyEquivalent:@""];
@@ -186,8 +192,8 @@
     fontUp.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     NSMenuItem *fontDown = [viewMenu addItemWithTitle:@"编辑器字体缩小" action:@selector(editorFontDownAction:) keyEquivalent:@"-"];
     fontDown.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
-    NSMenuItem *fontReset = [viewMenu addItemWithTitle:@"编辑器字体恢复默认" action:@selector(editorFontResetAction:) keyEquivalent:@"0"];
-    fontReset.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    // ⌥⌘0 让给「格式 › 正文」，这一项只保留菜单入口
+    [viewMenu addItemWithTitle:@"编辑器字体恢复默认" action:@selector(editorFontResetAction:) keyEquivalent:@""];
     NSMenuItem *wrapItem = [viewMenu addItemWithTitle:@"自动换行" action:@selector(toggleSoftWrapAction:) keyEquivalent:@"w"];
     wrapItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     [viewMenu addItem:[NSMenuItem separatorItem]];
@@ -204,6 +210,68 @@
     [mainMenu addItem:windowMenuItem];
 
     [NSApp setMainMenu:mainMenu];
+}
+
+#pragma mark - 格式菜单
+
+- (NSMenuItem *)addItemTo:(NSMenu *)menu title:(NSString *)title action:(SEL)action key:(NSString *)key
+                     mask:(NSEventModifierFlags)mask tag:(NSInteger)tag {
+    NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:key];
+    item.keyEquivalentModifierMask = mask;
+    item.tag = tag;
+    return item;
+}
+
+/// 快捷键对照 Word / Google Docs 的 Mac 版：⌥⌘0–4 正文与标题，⇧⌘8 / ⇧⌘7 列表，⌘B / ⌘I / ⌘U 文字样式
+- (NSMenu *)buildFormatMenu {
+    const NSEventModifierFlags cmd = NSEventModifierFlagCommand;
+    const NSEventModifierFlags optCmd = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    const NSEventModifierFlags shiftCmd = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    SEL paragraph = @selector(formatParagraphStyleAction:);
+
+    NSMenu *menu = [[NSMenu alloc] initWithTitle:@"格式"];
+    [self addItemTo:menu title:@"正文" action:paragraph key:@"0" mask:optCmd tag:TMParagraphStyleBody];
+    [self addItemTo:menu title:@"标题 1" action:paragraph key:@"1" mask:optCmd tag:TMParagraphStyleHeading1];
+    [self addItemTo:menu title:@"标题 2" action:paragraph key:@"2" mask:optCmd tag:TMParagraphStyleHeading2];
+    [self addItemTo:menu title:@"标题 3" action:paragraph key:@"3" mask:optCmd tag:TMParagraphStyleHeading3];
+    [self addItemTo:menu title:@"标题 4" action:paragraph key:@"4" mask:optCmd tag:TMParagraphStyleHeading4];
+    [menu addItem:[NSMenuItem separatorItem]];
+    [self addItemTo:menu title:@"加粗" action:@selector(formatInlineStyleAction:) key:@"b" mask:cmd tag:TMInlineStyleBold];
+    [self addItemTo:menu title:@"斜体" action:@selector(formatInlineStyleAction:) key:@"i" mask:cmd tag:TMInlineStyleItalic];
+    [self addItemTo:menu title:@"下划线" action:@selector(formatInlineStyleAction:) key:@"u" mask:cmd tag:TMInlineStyleUnderline];
+    [menu addItem:[NSMenuItem separatorItem]];
+    [self addItemTo:menu title:@"无序列表" action:paragraph key:@"8" mask:shiftCmd tag:TMParagraphStyleBulletList];
+    [self addItemTo:menu title:@"有序列表" action:paragraph key:@"7" mask:shiftCmd tag:TMParagraphStyleNumberedList];
+    [self addItemTo:menu title:@"引用" action:paragraph key:@"" mask:0 tag:TMParagraphStyleQuote];
+    [menu addItem:[NSMenuItem separatorItem]];
+
+    NSMenuItem *insertItem = [[NSMenuItem alloc] initWithTitle:@"插入" action:nil keyEquivalent:@""];
+    NSMenu *insertMenu = [[NSMenu alloc] initWithTitle:@"插入"];
+    [insertMenu addItemWithTitle:@"图片…" action:@selector(formatInsertImageAction:) keyEquivalent:@""];
+    [self addItemTo:insertMenu title:@"表格" action:@selector(formatInsertAction:) key:@"" mask:0 tag:TMFormatInsertTable];
+    [self addItemTo:insertMenu title:@"行内公式" action:@selector(formatInsertAction:) key:@"" mask:0 tag:TMFormatInsertInlineMath];
+    [self addItemTo:insertMenu title:@"公式块" action:@selector(formatInsertAction:) key:@"" mask:0 tag:TMFormatInsertDisplayMath];
+    [self addItemTo:insertMenu title:@"脚注" action:@selector(formatInsertAction:) key:@"" mask:0 tag:TMFormatInsertFootnote];
+    [self addItemTo:insertMenu title:@"链接" action:@selector(formatInsertAction:) key:@"k" mask:shiftCmd tag:TMFormatInsertLink];
+    insertItem.submenu = insertMenu;
+    [menu addItem:insertItem];
+    return menu;
+}
+
+- (void)formatParagraphStyleAction:(NSMenuItem *)sender {
+    [self.mainWindowController applyParagraphStyle:(TMParagraphStyle)sender.tag];
+}
+
+- (void)formatInlineStyleAction:(NSMenuItem *)sender {
+    [self.mainWindowController applyInlineStyle:(TMInlineStyle)sender.tag];
+}
+
+- (void)formatInsertAction:(NSMenuItem *)sender {
+    [self.mainWindowController insertFormat:(TMFormatInsertion)sender.tag];
+}
+
+- (void)formatInsertImageAction:(id)sender {
+    [self.mainWindowController insertImageFromPanel];
 }
 
 #pragma mark - 最近打开
@@ -347,6 +415,18 @@
 
 - (BOOL)validateMenuItem:(NSMenuItem *)menuItem {
     SEL action = menuItem.action;
+    if (action == @selector(formatParagraphStyleAction:)) {
+        BOOL enabled = [self.mainWindowController canApplyFormat];
+        menuItem.state = enabled && [self.mainWindowController currentParagraphStyle] == menuItem.tag ? NSControlStateValueOn : NSControlStateValueOff;
+        return enabled;
+    }
+    if (action == @selector(formatInlineStyleAction:) || action == @selector(formatInsertAction:)) {
+        return [self.mainWindowController canApplyFormat];
+    }
+    if (action == @selector(formatInsertImageAction:)) {
+        // Markdown 的图片语法和 figure 不同，先只给 LaTeX
+        return [self.mainWindowController canApplyFormat] && ![self.mainWindowController isEditingMarkdown];
+    }
     if (action == @selector(cancelCompileAction:)) {
         return [self.mainWindowController isCompiling];
     }

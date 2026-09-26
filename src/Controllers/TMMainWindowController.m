@@ -99,6 +99,8 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong) NSMutableSet<NSString *> *unhelpfulAutoCleans;
 /// 状态栏“编译目标 · 引擎”的后台判断代次。
 @property (nonatomic, assign) NSUInteger compileTargetGeneration;
+/// 标题 1 对应 \chapter（book / report / 学位论文类）还是 \section；随编译目标一起在后台判断。
+@property (nonatomic, assign) BOOL headingUsesChapters;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
@@ -325,6 +327,11 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
     // 3. 底部状态栏
     _statusBar = [[TMStatusBarView alloc] init];
     _statusBar.delegate = self;
+    NSMutableArray<NSString *> *styleTitles = [NSMutableArray array];
+    for (NSInteger style = TMParagraphStyleBody; style <= TMParagraphStyleQuote; style++) {
+        [styleTitles addObject:[TMFormatActions displayNameForParagraphStyle:(TMParagraphStyle)style]];
+    }
+    [_statusBar setParagraphStyleTitles:styleTitles];
     _statusBar.translatesAutoresizingMaskIntoConstraints = NO;
     [contentView addSubview:_statusBar];
 
@@ -374,13 +381,13 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
     titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [_pdfPlaceholderView addSubview:titleLabel];
 
-    NSTextField *subLabel = [NSTextField labelWithString:@"在左侧编辑代码，按 ⌘B 自动保存并编译"];
+    NSTextField *subLabel = [NSTextField labelWithString:@"在左侧编辑代码，按 ⌘↩ 自动保存并编译"];
     subLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightRegular];
     subLabel.textColor = [NSColor secondaryLabelColor];
     subLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [_pdfPlaceholderView addSubview:subLabel];
 
-    NSButton *compileBtn = [NSButton buttonWithTitle:@"▶ 立即编译预览 (⌘B)" target:self action:@selector(compileCurrentDocument)];
+    NSButton *compileBtn = [NSButton buttonWithTitle:@"▶ 立即编译预览 (⌘↩)" target:self action:@selector(compileCurrentDocument)];
     compileBtn.bezelStyle = NSBezelStyleRounded;
     compileBtn.controlSize = NSControlSizeRegular;
     compileBtn.keyEquivalent = @"\r";
@@ -485,7 +492,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)showPDFSearchBar {
     if (!self.pdfView.document) {
-        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘B 编译"];
+        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘↩ 编译"];
         return;
     }
     if (self.pdfSearchBar.hidden) {
@@ -685,6 +692,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self syncProjectRootWithDocument];
         [self startWatchingCurrentFile];
         [self refreshIssueMarks];
+        [self refreshCompileTarget];
         // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
         [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
         [self hideWelcome];
@@ -850,7 +858,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     }
 }
 
-/// 决定 ⌘B 实际编译哪个文件：暂存文档就是自己；否则按魔法注释 / \documentclass / 同目录引用推断。
+/// 决定 ⌘↩ 实际编译哪个文件：暂存文档就是自己；否则按魔法注释 / \documentclass / 同目录引用推断。
 - (NSURL *)mainFileURLForCompile {
     NSURL *fileURL = self.documentModel.fileURL;
     if (!fileURL || self.documentModel.isScratch) return fileURL;
@@ -1045,7 +1053,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if (!pdfURL || ![[NSFileManager defaultManager] fileExistsAtPath:pdfURL.path]) {
         NSAlert *alert = [[NSAlert alloc] init];
         alert.messageText = @"尚未生成 PDF";
-        alert.informativeText = @"请先按下 ⌘B 进行编译，成功生成 PDF 后方可导出。";
+        alert.informativeText = @"请先按下 ⌘↩ 进行编译，成功生成 PDF 后方可导出。";
         [alert runModal];
         return NO;
     }
@@ -1154,12 +1162,15 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     BOOL isCurrent = !main || [main isEqual:currentURL];
     BOOL isScratch = self.documentModel.isScratch;
     NSString *editorText = isCurrent ? [self.editorTextView.string copy] : nil;
+    NSString *currentText = editorText ?: [self.editorTextView.string copy];
     NSUInteger generation = ++self.compileTargetGeneration;
     __weak typeof(self) weakSelf = self;
 
     // 判断可能要读 .cls / 调 kpsewhich（首次约 0.2 秒），放后台，只采用最新一次的结果
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString *content = editorText ?: ([NSString stringWithContentsOfURL:main encoding:NSUTF8StringEncoding error:nil] ?: @"");
+        // 标题 1 对应 \chapter 还是 \section：看主文件的文档类
+        BOOL usesChapters = [TMFormatActions usesChaptersForMainContent:content currentContent:currentText];
         NSString *reason = nil;
         NSString *engine = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content
                                                                          directoryURL:(main ?: currentURL).URLByDeletingLastPathComponent
@@ -1170,7 +1181,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
         NSMutableString *tip = [NSMutableString string];
         if (main && !isScratch) {
             [tip appendFormat:@"编译文件：%@\n", main.path.stringByAbbreviatingWithTildeInPath];
-            if (!isCurrent) [tip appendFormat:@"（当前编辑的 %@ 不是主文件，⌘B 编译的是它）\n", currentURL.lastPathComponent];
+            if (!isCurrent) [tip appendFormat:@"（当前编辑的 %@ 不是主文件，⌘↩ 编译的是它）\n", currentURL.lastPathComponent];
         }
         [tip appendFormat:@"引擎：%@ — %@", TMEngineDisplayName(engine), reason];
         if (hasLatexmk) [tip appendString:@"\n由 latexmk 调度（自动处理多遍编译与参考文献）"];
@@ -1178,6 +1189,8 @@ static NSString *TMEngineDisplayName(NSString *engine) {
         dispatch_async(dispatch_get_main_queue(), ^{
             if (weakSelf.compileTargetGeneration != generation) return;
             [weakSelf.statusBar setCompileTargetFileName:fileName engine:TMEngineDisplayName(engine) toolTip:tip];
+            weakSelf.headingUsesChapters = usesChapters;
+            [weakSelf refreshParagraphStyleIndicator];
         });
     });
 }
@@ -1392,7 +1405,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     if (staleFile && ![self isShowingWelcome]) {
         [self cleanAuxiliaryFilesForMainFileKeepingBibliography:keepBibliography];
         [self compileCurrentDocument];
-        // 在 compileCurrentDocument 之后设：重试被手动 ⌘B 顶掉时，新编译不会被误当成重试
+        // 在 compileCurrentDocument 之后设：重试被手动 ⌘↩ 顶掉时，新编译不会被误当成重试
         self.isRetryingAfterAutoClean = YES;
         NSString *note = [NSString stringWithFormat:@"%@ 是上次留下的旧文件，已清理辅助文件并重新编译", staleFile];
         [self.logDrawer appendLogText:[NSString stringWithFormat:@"TeXMini：第一个错误出在 %@（旧的辅助文件），已自动清理并重新编译。\n\n", staleFile]];
@@ -1422,7 +1435,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 - (void)forwardSyncToPDF {
     if (!self.documentModel.fileURL) return;
     if (!self.currentPDFURL || !self.pdfView.document) {
-        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘B 编译"];
+        [self.statusBar showInfoMessage:@"还没有 PDF，请先 ⌘↩ 编译"];
         return;
     }
 
@@ -1501,6 +1514,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     self.currentCursorCol = column;
     [self.statusBar setCursorLine:line column:column];
     [self.outlineSidebarView highlightItemForLineNumber:line];
+    [self refreshParagraphStyleIndicator];
 }
 
 - (void)updateWordCount {
@@ -1572,7 +1586,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     }
     [self.editorTextView insertSnippet:snippet atLocation:loc cursorOffset:cursorOffset == NSNotFound ? snippet.length : cursorOffset];
 
-    if (images.count > 0) [self ensureGraphicxLoadedForMainFile:main];
+    if (images.count > 0) [self ensurePackage:@"graphicx" loadedForMainFile:main];
     [self.outlineSidebarView.fileBrowserView reload];
     return YES;
 }
@@ -1604,23 +1618,103 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     return [@"figures" stringByAppendingPathComponent:dest.lastPathComponent];
 }
 
-/// 当前编辑的就是主文件时直接在导言区插入 \usepackage{graphicx}；否则只提示。
-- (void)ensureGraphicxLoadedForMainFile:(NSURL *)main {
-    BOOL editingMain = [main.URLByStandardizingPath.path isEqualToString:self.documentModel.fileURL.URLByStandardizingPath.path];
+/// 当前编辑的就是主文件时直接在导言区插入 \usepackage{package}；否则只提示。
+- (void)ensurePackage:(NSString *)package loadedForMainFile:(nullable NSURL *)main {
+    BOOL editingMain = !main || [main.URLByStandardizingPath.path isEqualToString:self.documentModel.fileURL.URLByStandardizingPath.path];
     NSString *content = editingMain ? self.editorTextView.string
                                     : ([NSString stringWithContentsOfURL:main encoding:NSUTF8StringEncoding error:nil] ?: @"");
-    NSUInteger loc = [TMEditActions graphicxInsertionLocationInContent:content];
+    // graphbox 也会加载 graphicx
+    NSUInteger loc = [package isEqualToString:@"graphicx"] ? [TMEditActions graphicxInsertionLocationInContent:content]
+                                                            : [TMFormatActions usepackageInsertionLocationForPackage:package inContent:content];
     if (loc == NSNotFound) return;
     if (!editingMain) {
-        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"主文件 %@ 尚未加载 graphicx，请在导言区加上 \\usepackage{graphicx}", main.lastPathComponent]];
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"主文件 %@ 尚未加载 %@，请在导言区加上 \\usepackage{%@}", main.lastPathComponent, package, package]];
         return;
     }
     NSRange sel = self.editorTextView.selectedRange;
-    NSString *line = (loc > 0 && [content characterAtIndex:loc - 1] != '\n') ? @"\n\\usepackage{graphicx}\n" : @"\\usepackage{graphicx}\n";
+    NSString *usepackage = [NSString stringWithFormat:@"\\usepackage{%@}\n", package];
+    NSString *line = (loc > 0 && [content characterAtIndex:loc - 1] != '\n') ? [@"\n" stringByAppendingString:usepackage] : usepackage;
     [self.editorTextView insertSnippet:line atLocation:loc cursorOffset:0];
-    // 插在光标之前，把光标挪回原来的位置（仍在 \caption{ 里）
-    [self.editorTextView setSelectedRange:NSMakeRange(sel.location + (loc <= sel.location ? line.length : 0), 0)];
+    // 插在光标之前，把光标和选区挪回原来的位置
+    [self.editorTextView setSelectedRange:NSMakeRange(sel.location + (loc <= sel.location ? line.length : 0), sel.length)];
     [self.editorTextView scrollRangeToVisible:self.editorTextView.selectedRange];
+}
+
+#pragma mark - 格式菜单
+
+- (BOOL)canApplyFormat {
+    if ([self isShowingWelcome]) return NO;
+    TMEditorSyntax syntax = self.editorTextView.syntax;
+    return syntax == TMEditorSyntaxLaTeX || syntax == TMEditorSyntaxMarkdown;
+}
+
+- (BOOL)isEditingMarkdown {
+    return self.editorTextView.syntax == TMEditorSyntaxMarkdown;
+}
+
+- (TMParagraphStyle)currentParagraphStyle {
+    return [TMFormatActions paragraphStyleAtLocation:self.editorTextView.selectedRange.location inText:self.editorTextView.string
+                                            markdown:[self isEditingMarkdown] usesChapters:self.headingUsesChapters];
+}
+
+- (void)applyFormatEdit:(nullable TMFormatEdit *)edit actionName:(NSString *)actionName {
+    if (!edit || ![self canApplyFormat]) return;
+    [self.window makeFirstResponder:self.editorTextView];
+    [self.editorTextView replaceRange:edit.range withText:edit.replacement selection:edit.selection actionName:actionName];
+    if (edit.requiredPackage) [self ensurePackage:edit.requiredPackage loadedForMainFile:[self mainFileURLForCompile]];
+    [self refreshParagraphStyleIndicator];
+}
+
+- (void)applyParagraphStyle:(TMParagraphStyle)style {
+    TMFormatEdit *edit = [TMFormatActions editForParagraphStyle:style selection:self.editorTextView.selectedRange inText:self.editorTextView.string
+                                                       markdown:[self isEditingMarkdown] usesChapters:self.headingUsesChapters];
+    [self applyFormatEdit:edit actionName:[TMFormatActions displayNameForParagraphStyle:style]];
+}
+
+- (void)applyInlineStyle:(TMInlineStyle)style {
+    static NSString *const names[] = {@"加粗", @"斜体", @"下划线"};
+    TMFormatEdit *edit = [TMFormatActions editForInlineStyle:style selection:self.editorTextView.selectedRange
+                                                      inText:self.editorTextView.string markdown:[self isEditingMarkdown]];
+    [self applyFormatEdit:edit actionName:names[style]];
+}
+
+- (void)insertFormat:(TMFormatInsertion)kind {
+    static NSString *const names[] = {@"插入行内公式", @"插入公式块", @"插入表格", @"插入脚注", @"插入链接"};
+    TMFormatEdit *edit = [TMFormatActions editForInsertion:kind selection:self.editorTextView.selectedRange
+                                                    inText:self.editorTextView.string markdown:[self isEditingMarkdown]];
+    [self applyFormatEdit:edit actionName:names[kind]];
+}
+
+- (void)insertImageFromPanel {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    NSMutableArray<UTType *> *types = [NSMutableArray array];
+    for (NSString *ext in [TMEditActions droppableImageExtensions]) {
+        UTType *type = [UTType typeWithFilenameExtension:ext];
+        if (type) [types addObject:type];
+    }
+    panel.allowedContentTypes = types;
+    panel.allowsMultipleSelection = YES;
+    panel.message = @"选择要插入的图片（项目外的图片会复制到 figures/）";
+    NSURL *main = [self mainFileURLForCompile];
+    if (main && !self.documentModel.isScratch) panel.directoryURL = main.URLByDeletingLastPathComponent;
+    if ([panel runModal] != NSModalResponseOK || panel.URLs.count == 0) return;
+    [self editorTextView:self.editorTextView didDropFileURLs:panel.URLs atCharacterIndex:self.editorTextView.selectedRange.location];
+    [self.window makeFirstResponder:self.editorTextView];
+}
+
+/// 状态栏样式框跟随光标；停下来再算，连续打字 / 按方向键时不重复扫描
+- (void)refreshParagraphStyleIndicator {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(updateParagraphStyleIndicatorNow) object:nil];
+    [self performSelector:@selector(updateParagraphStyleIndicatorNow) withObject:nil afterDelay:0.15];
+}
+
+- (void)updateParagraphStyleIndicatorNow {
+    [self.statusBar setParagraphStyle:[self canApplyFormat] ? [self currentParagraphStyle] : -1];
+}
+
+- (void)statusBarDidSelectParagraphStyle:(NSInteger)style {
+    if (style == [self currentParagraphStyle]) return;
+    [self applyParagraphStyle:(TMParagraphStyle)style];
 }
 
 #pragma mark - 首页与上次会话
@@ -1983,9 +2077,9 @@ static NSString *TMEngineDisplayName(NSString *engine) {
         item.target = self;
         item.action = @selector(openFileAction:);
     } else if ([itemIdentifier isEqualToString:@"CompileDoc"]) {
-        item.label = @"编译 (⌘B)";
+        item.label = @"编译 (⌘↩)";
         item.paletteLabel = @"编译文档";
-        item.toolTip = @"保存并自动编译生成 PDF (⌘B)";
+        item.toolTip = @"保存并自动编译生成 PDF (⌘↩)";
         item.image = [NSImage imageWithSystemSymbolName:@"play.circle.fill" accessibilityDescription:@"Compile"];
         item.target = self;
         item.action = @selector(compileCurrentDocument);
@@ -1999,7 +2093,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     } else if ([itemIdentifier isEqualToString:@"CleanAux"]) {
         item.label = @"清理";
         item.paletteLabel = @"清理缓存文件";
-        item.toolTip = @"清理 .aux、.log、.bbl 等辅助文件 (⌘K)；⌥⌘B 清理后重新编译";
+        item.toolTip = @"清理 .aux、.log、.bbl 等辅助文件 (⌘K)；⌥⌘↩ 清理后重新编译";
         item.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"Clean"];
         item.target = self;
         item.action = @selector(cleanAuxFilesAction:);

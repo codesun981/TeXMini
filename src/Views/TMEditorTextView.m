@@ -710,6 +710,33 @@ static unichar TMMatchingBracket(unichar c) {
     [self setSelectedRange:NSMakeRange(MIN(cursor, newLen), 0)];
 }
 
+- (void)replaceRange:(NSRange)range withText:(NSString *)replacement selection:(NSRange)selection actionName:(NSString *)actionName {
+    if (NSMaxRange(range) > self.string.length) return;
+    if (![self shouldChangeTextInRange:range replacementString:replacement]) return;
+    [self.textStorage replaceCharactersInRange:range withString:replacement];
+    [self didChangeText];
+    [self.undoManager setActionName:actionName];
+    NSUInteger length = self.string.length;
+    NSUInteger loc = MIN(selection.location, length);
+    [self setSelectedRange:NSMakeRange(loc, MIN(selection.length, length - loc))];
+    [self scrollRangeToVisible:self.selectedRange];
+}
+
+#pragma mark - 右键菜单
+
+/// 系统的右键菜单后面接上「格式」子菜单（和菜单栏里的是同一组命令）
+- (NSMenu *)menuForEvent:(NSEvent *)event {
+    NSMenu *menu = [super menuForEvent:event];
+    NSMenuItem *format = [NSApp.mainMenu itemWithTitle:@"格式"];
+    if (menu && format.submenu && self.syntax != TMEditorSyntaxBibTeX && self.syntax != TMEditorSyntaxPlain) {
+        [menu insertItem:[NSMenuItem separatorItem] atIndex:0];
+        NSMenuItem *item = [[NSMenuItem alloc] initWithTitle:@"格式" action:nil keyEquivalent:@""];
+        item.submenu = [format.submenu copy];
+        [menu insertItem:item atIndex:0];
+    }
+    return menu;
+}
+
 #pragma mark - 光标行列位置更新
 
 - (void)setSelectedRanges:(NSArray<NSValue *> *)selectedRanges affinity:(NSSelectionAffinity)affinity stillSelecting:(BOOL)stillSelecting {
