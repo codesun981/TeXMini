@@ -81,6 +81,20 @@ static NSString *const kTMIndentUnit = @"  ";
     return [TMLaTeXHighlighter baseFontName];
 }
 
+- (TMEditorSyntax)syntax {
+    return [TMLaTeXHighlighter syntaxForTextStorage:self.textStorage];
+}
+
+- (void)setSyntax:(TMEditorSyntax)syntax {
+    if (syntax == self.syntax) return;
+    [TMLaTeXHighlighter setSyntax:syntax forTextStorage:self.textStorage];
+    [self rehighlightAll];
+}
+
+- (BOOL)isLaTeX {
+    return self.syntax == TMEditorSyntaxLaTeX;
+}
+
 #pragma mark - 自动换行
 
 - (void)setSoftWrapEnabled:(BOOL)softWrapEnabled {
@@ -365,7 +379,7 @@ static unichar TMMatchingBracket(unichar c) {
         if ([str isEqualToString:@"{"]) closing = @"}";
         else if ([str isEqualToString:@"["]) closing = @"]";
         else if ([str isEqualToString:@"("]) closing = @")";
-        else if ([str isEqualToString:@"$"]) closing = @"$";
+        else if ([str isEqualToString:@"$"] && [self isLaTeX]) closing = @"$";
 
         if (closing) {
             if (sel.length > 0) {
@@ -387,7 +401,7 @@ static unichar TMMatchingBracket(unichar c) {
                 [self setSelectedRange:NSMakeRange(after.location - 1, 0)];
             }
             // \cite{ \ref{ \begin{ 之后自动弹出候选
-            if ([str isEqualToString:@"{"]) [self triggerArgumentCompletionIfNeeded];
+            if ([str isEqualToString:@"{"] && [self isLaTeX]) [self triggerArgumentCompletionIfNeeded];
             return;
         }
 
@@ -397,7 +411,7 @@ static unichar TMMatchingBracket(unichar c) {
             NSRange lineRange = [full lineRangeForRange:NSMakeRange(sel.location, 0)];
             NSString *currentLine = [full substringWithRange:lineRange];
             NSString *indent = [TMEditActions leadingWhitespaceOfLine:currentLine];
-            NSString *env = [TMEditActions environmentToCloseInLine:currentLine];
+            NSString *env = [self isLaTeX] ? [TMEditActions environmentToCloseInLine:currentLine] : nil;
 
             if (env && [self shouldAutoCloseEnvironment:env afterLineRange:lineRange]) {
                 NSString *block = [NSString stringWithFormat:@"\n%@%@\n%@\\end{%@}", indent, kTMIndentUnit, indent, env];
@@ -487,7 +501,7 @@ static unichar TMMatchingBracket(unichar c) {
 /// 连续快速打完 \section 的人不会被弹窗打断：每敲一个键都会取消上一次还没弹出的请求。
 - (void)scheduleCommandCompletionIfNeeded {
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCompleteCommand) object:nil];
-    if (!self.completionProvider || self.completionPopup.isVisible || self.hasMarkedText || self.selectedRange.length > 0) return;
+    if (!self.completionProvider || ![self isLaTeX] || self.completionPopup.isVisible || self.hasMarkedText || self.selectedRange.length > 0) return;
     TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
     if (ctx.kind != TMCompletionKindCommand || ctx.partial.length < 2) return;
     [self performSelector:@selector(autoCompleteCommand) withObject:nil afterDelay:0.12];

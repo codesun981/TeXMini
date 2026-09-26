@@ -14,6 +14,7 @@
 #import "TMLaTeXScanner.h"
 #import "TMFontSettings.h"
 #import "TMFontCatalog.h"
+#import "TMMarkdownScanner.h"
 
 static int gPassed = 0;
 static int gFailed = 0;
@@ -887,6 +888,61 @@ TM_TEST(test_font_catalog_lists_songti_and_hides_pingfang) {
     TM_ASSERT_TRUE(songti.supportsChinese);
     TM_ASSERT_TRUE(songti.hasBold);
     TM_ASSERT_TRUE(!pingfang);
+}
+
+#pragma mark - TMMarkdownScanner
+
+/// 把扫描结果拼成 "kind:文字" 列表，便于断言
+static NSArray<NSString *> *TMMarkdownRegionsOf(NSString *s) {
+    TMMarkdownScanResult *r = [TMMarkdownScanner scanString:s];
+    NSMutableArray *out = [NSMutableArray array];
+    for (NSUInteger i = 0; i < r.regionCount; i++) {
+        [out addObject:[NSString stringWithFormat:@"%ld:%@", (long)r.regions[i].kind, [s substringWithRange:r.regions[i].range]]];
+    }
+    return out;
+}
+
+static BOOL TMHasRegion(NSArray<NSString *> *regions, TMMarkdownRegionKind kind, NSString *text) {
+    return [regions containsObject:[NSString stringWithFormat:@"%ld:%@", (long)kind, text]];
+}
+
+TM_TEST(test_markdown_percent_is_not_a_comment) {
+    TM_ASSERT_EQ_INT(TMMarkdownRegionsOf(@"增长了 50% 以上，a & b\n").count, 0);
+}
+
+TM_TEST(test_markdown_heading_and_inline) {
+    NSArray *r = TMMarkdownRegionsOf(@"## 标题\n一段 **粗体** 和 *斜体* 以及 `a*b*c` 与 ~~删~~\n");
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionHeading, @"## 标题"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionMarker, @"##"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionStrong, @"**粗体**"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionEmphasis, @"*斜体*"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionCode, @"`a*b*c`"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionStrike, @"~~删~~"));
+    // 代码里的 *b* 不算斜体
+    TM_ASSERT_TRUE(!TMHasRegion(r, TMMarkdownRegionEmphasis, @"*b*"));
+}
+
+TM_TEST(test_markdown_hash_without_space_is_not_heading) {
+    NSArray *r = TMMarkdownRegionsOf(@"#tag 不是标题\n");
+    TM_ASSERT_EQ_INT(r.count, 0);
+}
+
+TM_TEST(test_markdown_fenced_code_spans_blank_lines) {
+    NSString *s = @"前\n```\na = 1 # x\n\n**不粗**\n```\n后\n";
+    NSArray *r = TMMarkdownRegionsOf(s);
+    TM_ASSERT_EQ_INT(r.count, 1);
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionCode, @"```\na = 1 # x\n\n**不粗**\n```"));
+}
+
+TM_TEST(test_markdown_lists_quotes_links_rules) {
+    NSArray *r = TMMarkdownRegionsOf(@"- 一\n1. 二\n> 引用\n---\n见 [文档](https://a.b/c_d) 和 snake_case_name\n");
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionMarker, @"-"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionMarker, @"1."));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionQuote, @"> 引用"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionMarker, @"---"));
+    TM_ASSERT_TRUE(TMHasRegion(r, TMMarkdownRegionLink, @"[文档](https://a.b/c_d)"));
+    NSString *emphasisPrefix = [NSString stringWithFormat:@"%ld:", (long)TMMarkdownRegionEmphasis];
+    for (NSString *x in r) TM_ASSERT_TRUE(![x hasPrefix:emphasisPrefix]);
 }
 
 #pragma mark - Runner

@@ -928,6 +928,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.displayName];
     self.window.representedURL = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
     self.window.documentEdited = self.documentModel.isDirty;
+    // 标题跟着文件名变的地方（打开、另存为、重命名）也就是文件类型可能变的地方
+    self.editorTextView.syntax = [TMLaTeXHighlighter syntaxForFileURL:self.documentModel.isScratch ? nil : self.documentModel.fileURL];
 }
 
 - (BOOL)hasUnsavedChanges {
