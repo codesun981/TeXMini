@@ -1135,6 +1135,7 @@ TM_TEST(test_format_usepackage_location) {
 #include "TMCompilerOutputPathTests.inc"
 #include "TMBibliographySafetyTests.inc"
 #include "TMProjectResolutionTests.inc"
+#include "TMAuxiliaryCleanerTests.inc"
 #include "TMCompilerEncodingTests.inc"
 
 int main(void) {

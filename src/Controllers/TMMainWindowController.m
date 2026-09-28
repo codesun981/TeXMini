@@ -5,6 +5,7 @@
 #import "TMStatusBarView.h"
 #import "TMLogDrawerView.h"
 #import "TMCompiler.h"
+#import "TMAuxiliaryCleaner.h"
 #import "TMWordCounter.h"
 #import "TMCompileTargetResolver.h"
 #import "TMSyncTeX.h"
@@ -105,13 +106,18 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 /// 标题 1 对应 \chapter（book / report / 学位论文类）还是 \section；随编译目标一起在后台判断。
 @property (nonatomic, assign) BOOL headingUsesChapters;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
+@property (nonatomic, assign) BOOL isCleaningAuxiliaryFiles;
+@property (nonatomic, assign) BOOL compileAfterAuxiliaryCleanup;
 @property (nonatomic, assign) NSUInteger compilationContextGeneration;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
 @property (nonatomic, strong) TMCompletionProvider *completionProvider;
 @property (nonatomic, strong, nullable) TMFileWatcher *fileWatcher;
-/// 上次我们自己读 / 写磁盘文件时的修改时间，用来判断是否有外部改动。
-@property (nonatomic, strong, nullable) NSDate *knownModificationDate;
+/// 外部读取请求的代次；磁盘基线由文档模型维护。
+@property (nonatomic) NSUInteger externalChangeCheckGeneration;
+@property (nonatomic) BOOL isCheckingExternalChange;
+/// 关闭项目后的空白文档只用于首页；它不能覆盖已保存的会话。
+@property (nonatomic, weak, nullable) TMDocument *closedSessionPlaceholder;
 @property (nonatomic, assign) BOOL isShowingExternalChangeAlert;
 @property (nonatomic, strong, nullable) NSURL *scratchDirectoryURL;
 @property (nonatomic, strong, nullable) TMFontFixController *fontFix;
@@ -738,8 +744,9 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (nullable NSURL *)expectedPDFURLForMainFile {
     NSURL *main = [self mainFileURLForCompile];
     if (!main) return nil;
-    NSString *base = main.lastPathComponent.stringByDeletingPathExtension;
-    return [main.URLByDeletingLastPathComponent URLByAppendingPathComponent:[base stringByAppendingPathExtension:@"pdf"]];
+    TMCompiler *compiler = TMCompiler.sharedCompiler;
+    return [TMCompiler outputPathsForTeXFileURL:main auxFilesBesideSource:compiler.auxFilesBesideSource
+                                extraArguments:compiler.extraArguments].pdfURL;
 }
 
 #pragma mark - 项目（文件夹）
@@ -775,24 +782,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 #pragma mark - 外部修改检测
 
-- (nullable NSDate *)modificationDateOfCurrentFile {
-    NSURL *url = self.documentModel.fileURL;
-    if (!url || self.documentModel.isScratch) return nil;
-    NSDate *date = nil;
-    [url getResourceValue:&date forKey:NSURLContentModificationDateKey error:nil];
-    return date;
-}
-
-- (void)rememberCurrentFileModificationDate {
-    // 清掉 URL 资源缓存，否则可能拿到旧值
-    [self.documentModel.fileURL removeCachedResourceValueForKey:NSURLContentModificationDateKey];
-    self.knownModificationDate = [self modificationDateOfCurrentFile];
-}
-
 - (void)startWatchingCurrentFile {
     [self.fileWatcher stop];
     self.fileWatcher = nil;
-    [self rememberCurrentFileModificationDate];
+    self.externalChangeCheckGeneration++;
+    self.isCheckingExternalChange = NO;
     NSURL *url = self.documentModel.fileURL;
     if (!url || self.documentModel.isScratch) return;
     __weak typeof(self) weakSelf = self;
@@ -802,51 +796,93 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)checkForExternalModification {
-    if (self.isShowingExternalChangeAlert) return;
-    NSURL *url = self.documentModel.fileURL;
-    if (!url || self.documentModel.isScratch) return;
-    [url removeCachedResourceValueForKey:NSURLContentModificationDateKey];
-    NSDate *onDisk = [self modificationDateOfCurrentFile];
-    if (!onDisk) return; // 被删除 / 移动：保留编辑器内容，用户保存时会重新写出
-    if (self.knownModificationDate && [onDisk compare:self.knownModificationDate] != NSOrderedDescending) return;
+    if (self.isShowingExternalChangeAlert || self.isCheckingExternalChange) return;
+    TMDocument *document = self.documentModel;
+    NSURL *url = document.fileURL;
+    if (!url || document.isScratch || !document.hasExternalChanges) return;
+    self.isCheckingExternalChange = YES;
+    NSUInteger generation = ++self.externalChangeCheckGeneration;
+    __weak typeof(self) weakSelf = self;
+    // 解码可能涉及大文件，放到后台；返回后再次核对文档、路径和磁盘基线。
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSError *error = nil;
+        TMDocument *diskDocument = [weakSelf readExternalDocumentAtURL:url error:&error];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) self = weakSelf;
+            if (!self || generation != self.externalChangeCheckGeneration) return;
+            self.isCheckingExternalChange = NO;
+            if (self.documentModel != document || ![document.fileURL isEqual:url] || !document.hasExternalChanges) return;
+            if (!diskDocument) {
+                if ([error.domain isEqualToString:TMDocumentErrorDomain] && error.code == TMDocumentErrorExternalChange) {
+                    [self scheduleExternalChangeCheck];
+                    return;
+                }
+                NSString *message = [NSString stringWithFormat:@"无法重新载入 %@：%@。已保留编辑内容，可使用“另存为…”保存到其他位置。", url.lastPathComponent, error.localizedDescription ?: @"文件已被移动或删除"];
+                [self.statusBar showInfoMessage:message];
+                return;
+            }
+            if (diskDocument.hasExternalChanges) {
+                [self scheduleExternalChangeCheck];
+                return;
+            }
+            if ([diskDocument.content isEqualToString:self.editorTextView.string]) {
+                // 接受真正读到的版本及其编码，不接受提示期间才出现的新版本。
+                self.documentModel = diskDocument;
+                [self refreshWindowTitle];
+                [self scheduleExternalChangeCheck];
+                return;
+            }
+            if (!document.isDirty) {
+                [self reloadDocumentFromDisk:diskDocument];
+                [self.statusBar showInfoMessage:[NSString stringWithFormat:@"%@ 已在磁盘上更新，已重新载入", url.lastPathComponent]];
+                [self scheduleExternalChangeCheck];
+                return;
+            }
+            self.isShowingExternalChangeAlert = YES;
+            NSModalResponse response = [self responseToExternalChangeAtURL:url];
+            self.isShowingExternalChangeAlert = NO;
+            if (self.documentModel != document || generation != self.externalChangeCheckGeneration) return;
+            if (response == NSAlertFirstButtonReturn) [self reloadDocumentFromDisk:diskDocument];
+            else [document acknowledgeDiskStateFromDocument:diskDocument];
+            // 弹窗期间的新 watcher 事件可能被合并；仍以这次实际展示的快照为基线再检查。
+            [self scheduleExternalChangeCheck];
+        });
+    });
+}
 
-    NSString *diskContent = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
-    if (!diskContent) return;
-    if ([diskContent isEqualToString:self.editorTextView.string]) {
-        // 内容相同（比如 git checkout 回同一版本），只更新时间戳
-        self.knownModificationDate = onDisk;
-        return;
-    }
+/// 连续外部写入时让磁盘先稳定，避免读取失败后立即反复扫描；切换文档和关窗会使代次失效。
+- (void)scheduleExternalChangeCheck {
+    NSUInteger generation = self.externalChangeCheckGeneration;
+    TMDocument *document = self.documentModel;
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        typeof(self) self = weakSelf;
+        if (!self || generation != self.externalChangeCheckGeneration || self.documentModel != document) return;
+        [self checkForExternalModification];
+    });
+}
 
-    if (!self.documentModel.isDirty) {
-        [self reloadDocumentFromDiskWithContent:diskContent modificationDate:onDisk];
-        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"%@ 已在磁盘上更新，已重新载入", url.lastPathComponent]];
-        return;
-    }
+- (TMDocument *)readExternalDocumentAtURL:(NSURL *)url error:(NSError **)error {
+    return [TMDocument documentWithContentsOfURL:url error:error];
+}
 
-    self.isShowingExternalChangeAlert = YES;
+- (NSModalResponse)responseToExternalChangeAtURL:(NSURL *)url {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"文件已在磁盘上被修改";
     alert.informativeText = [NSString stringWithFormat:@"“%@” 被其他程序修改，而编辑器里也有未保存的更改。\n\n重新载入会丢弃编辑器里的更改；保留则下次保存会覆盖磁盘上的版本。", url.lastPathComponent];
     [alert addButtonWithTitle:@"重新载入"];
     [alert addButtonWithTitle:@"保留我的更改"];
-    NSModalResponse response = [alert runModal];
-    self.isShowingExternalChangeAlert = NO;
-    if (response == NSAlertFirstButtonReturn) {
-        [self reloadDocumentFromDiskWithContent:diskContent modificationDate:onDisk];
-    } else {
-        self.knownModificationDate = onDisk; // 不再为同一次改动重复提醒
-    }
+    return [alert runModal];
 }
 
 /// 用磁盘内容替换编辑器文本，尽量保住光标与滚动位置。
-- (void)reloadDocumentFromDiskWithContent:(NSString *)content modificationDate:(NSDate *)date {
+- (void)reloadDocumentFromDisk:(TMDocument *)diskDocument {
+    NSString *content = diskDocument.content;
     [_fontFix cancelPendingRequests];
     NSRange sel = self.editorTextView.selectedRange;
     NSRect visible = self.editorScrollView.contentView.bounds;
 
-    self.documentModel.content = content;
-    self.documentModel.isDirty = NO;
+    self.documentModel = diskDocument;
     self.editorTextView.string = content;
     [self.editorTextView.undoManager removeAllActions];
     [self.editorTextView rehighlightAll];
@@ -856,7 +892,6 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     [self.editorScrollView.contentView scrollToPoint:visible.origin];
     [self.editorScrollView reflectScrolledClipView:self.editorScrollView.contentView];
 
-    self.knownModificationDate = date;
     [self refreshWindowTitle];
     [self scheduleOutlineUpdateImmediate:YES];
     [self.completionProvider invalidate];
@@ -943,6 +978,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if (!mapped) return;
     [self resetCompilationState];
     self.documentModel.fileURL = [NSURL fileURLWithPath:mapped];
+    [self.documentModel acknowledgeExternalChanges];
     [self refreshCompileTarget];
     [self refreshWindowTitle];
     [self startWatchingCurrentFile];
@@ -1063,7 +1099,17 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     return NO;
 }
 
+- (void)reportSaveError:(NSError *)error {
+    [self.statusBar showInfoMessage:[NSString stringWithFormat:@"保存失败：%@", error.localizedDescription ?: @"未知错误"]];
+    if ([error.domain isEqualToString:TMDocumentErrorDomain] && error.code == TMDocumentErrorExternalChange) {
+        [self checkForExternalModification];
+    } else {
+        [[NSAlert alertWithError:error] runModal];
+    }
+}
+
 - (BOOL)saveCurrentDocument {
+    if (self.isShowingExternalChangeAlert) return NO;
     self.documentModel.content = self.editorTextView.string;
 
     if (!self.documentModel.fileURL || self.documentModel.isScratch) {
@@ -1072,7 +1118,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
     NSError *err = nil;
     if (![self.documentModel saveCurrentFileWithError:&err]) {
-        [[NSAlert alertWithError:err] runModal];
+        [self reportSaveError:err];
         return NO;
     }
     [self didWriteCurrentFile];
@@ -1098,7 +1144,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
     NSError *err = nil;
     if (![self.documentModel saveToURL:panel.URL error:&err]) {
-        [[NSAlert alertWithError:err] runModal];
+        [self reportSaveError:err];
         return NO;
     }
     [self resetCompilationState];
@@ -1174,6 +1220,10 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    self.externalChangeCheckGeneration++;
+    self.isCheckingExternalChange = NO;
+    [self.fileWatcher stop];
+    self.fileWatcher = nil;
     [self resetCompilationState];
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];
@@ -1200,6 +1250,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     [self.autoCompileTimer invalidate];
     self.autoCompileTimer = nil;
     self.needsCompileAfterCurrent = NO;
+    self.compileAfterAuxiliaryCleanup = NO;
     self.isRetryingAfterAutoClean = NO;
     [[TMCompiler sharedCompiler] cancelCompilationAndDiscardResults];
     self.lastCompilationMainFileURL = nil;
@@ -1212,6 +1263,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)compileCurrentDocument {
+    if (self.isCleaningAuxiliaryFiles) {
+        self.compileAfterAuxiliaryCleanup = YES;
+        [self.statusBar showInfoMessage:@"正在清理辅助文件，完成后编译"];
+        return;
+    }
     // 任何一次新编译都不是“自动清理后的重试”（重试会在调用本方法之后再把标记设上）
     self.isRetryingAfterAutoClean = NO;
     if ([self isShowingWelcome]) return;
@@ -1220,21 +1276,30 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self.statusBar showInfoMessage:@"请先打开文件或输入 LaTeX 内容"];
         return;
     }
-    [_fontFix cancelPendingRequests];
-    self.compilationContextGeneration++;
+    if (self.isShowingExternalChangeAlert) return;
     self.documentModel.content = self.editorTextView.string;
 
     // 如果还没有指定文件路径，暂存到临时工作空间，省去弹窗干扰
     if (!self.documentModel.fileURL) {
         NSURL *tmpURL = [self scratchFileURLNamed:@"TeXMini_Document.tex"];
-        [self.documentModel saveScratchToURL:tmpURL error:nil];
-    } else if (self.documentModel.isDirty || ![[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.fileURL.path]) {
+        NSError *error = nil;
+        if (![self.documentModel saveScratchToURL:tmpURL error:&error]) {
+            [self reportSaveError:error];
+            return;
+        }
+    } else if (self.documentModel.isDirty || self.documentModel.hasExternalChanges || ![[NSFileManager defaultManager] fileExistsAtPath:self.documentModel.fileURL.path]) {
         // 没改动就不写盘：原子写会换 inode，白白触发一轮文件监听重挂
-        [self.documentModel saveCurrentFileWithError:nil];
+        NSError *error = nil;
+        if (![self.documentModel saveCurrentFileWithError:&error]) {
+            [self reportSaveError:error];
+            return;
+        }
         [self didWriteCurrentFile];
         [self refreshWindowTitle];
     }
 
+    [_fontFix cancelPendingRequests];
+    self.compilationContextGeneration++;
     [self.logDrawer clearLog];
     self.lastIssues = @[];
     [self refreshIssueMarks];
@@ -1328,14 +1393,19 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     [self.window makeFirstResponder:self.editorTextView];
 }
 
-/// 我们自己写完磁盘后调用：记住新的修改时间（避免误报外部修改），并让补全重新扫描。
+/// 仅成功写盘后调用；磁盘基线由 TMDocument 保存，补全只失效当前文件。
 - (void)didWriteCurrentFile {
-    [self rememberCurrentFileModificationDate];
     [self.completionProvider invalidateFileAtURL:self.documentModel.fileURL];
     [self.editorTextView refreshCompletionIfNeeded];
 }
 
 - (void)cancelCompilation {
+    if (self.isCleaningAuxiliaryFiles) {
+        self.compilationContextGeneration++;
+        self.compileAfterAuxiliaryCleanup = NO;
+        self.needsCompileAfterCurrent = NO;
+        [self.statusBar showInfoMessage:@"已取消待执行的编译"];
+    }
     [[TMCompiler sharedCompiler] cancelCompilation];
 }
 
@@ -1372,10 +1442,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
         return NO;
     }
 
-    [self.documentModel.fileURL removeCachedResourceValueForKey:NSURLContentModificationDateKey];
-    NSDate *onDisk = [self modificationDateOfCurrentFile];
-    if (!onDisk) return NO;
-    if (self.knownModificationDate && [onDisk compare:self.knownModificationDate] == NSOrderedDescending) {
+    if (self.documentModel.hasExternalChanges) {
         [self checkForExternalModification];
         return NO;
     }
@@ -1481,22 +1548,17 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     } else if (staleFile && [self.unhelpfulAutoCleans containsObject:key]) {
         staleFile = nil;
     }
-    BOOL keepBibliography = staleFile && main && ![TMProject canRegenerateBibliographyForTeXFileURL:main];
-    if (staleFile && keepBibliography && [staleFile.pathExtension.lowercaseString isEqualToString:@"bbl"]) {
-        // 找不到生成它的 .bib（arXiv 源码常见）：删了就再也生成不出来，不动它
-        hint = [NSString stringWithFormat:@"错误出在 %@，但没找到能重新生成它的 .bib 文件，未自动清理（删掉就无法恢复）。", staleFile];
-        staleFile = nil;
-    }
     if (staleFile && ![self isShowingWelcome]) {
-        [self cleanAuxiliaryFilesForMainFileKeepingBibliography:keepBibliography];
-        [self compileCurrentDocument];
-        // 在 compileCurrentDocument 之后设：重试被手动 ⌘↩ 顶掉时，新编译不会被误当成重试
-        self.isRetryingAfterAutoClean = YES;
-        NSString *note = [NSString stringWithFormat:@"%@ 是上次留下的旧文件，已清理辅助文件并重新编译", staleFile];
-        [self.logDrawer appendLogText:[NSString stringWithFormat:@"TeXMini：第一个错误出在 %@（旧的辅助文件），已自动清理并重新编译。\n\n", staleFile]];
-        [self.statusBar showCompilingStateWithEngine:note];
+        [self beginAuxiliaryCleanupKeepingBibliography:NO rebuild:YES retryFile:staleFile failureHandler:^{
+            NSString *warning = [NSString stringWithFormat:@"错误出在 %@，但无法确认它依赖的 .bib 文件齐全，未自动清理，以免丢失参考文献。", staleFile];
+            [self showCompilationFailure:summary line:lineNumber log:log issues:issues hint:warning];
+        }];
         return;
     }
+    [self showCompilationFailure:summary line:lineNumber log:log issues:issues hint:hint];
+}
+
+- (void)showCompilationFailure:(NSString *)summary line:(NSInteger)lineNumber log:(NSString *)log issues:(NSArray<TMLogIssue *> *)issues hint:(nullable NSString *)hint {
     if (hint) [self.logDrawer appendLogText:[NSString stringWithFormat:@"\nTeXMini：%@\n", hint]];
     [self.statusBar showErrorStateWithMessage:summary line:lineNumber];
     self.lastIssues = issues;
@@ -1511,6 +1573,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 
 - (void)compilerDidCancel {
     self.isRetryingAfterAutoClean = NO;
+    if (self.isCleaningAuxiliaryFiles) return;
     [self.statusBar showInfoMessage:@"已取消编译"];
     [self runPendingAutoCompileIfNeeded];
 }
@@ -1829,6 +1892,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 
 /// 记下当前项目文件夹、文件与光标；未命名文档会清除上一次启动会话。
 - (void)saveSessionState {
+    if (self.documentModel && self.documentModel == self.closedSessionPlaceholder) return;
     NSURL *file = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
     if (!file && !self.projectRootURL) {
         // 当前是全新的未命名文档：不要把上一个项目留作下次启动的会话。
@@ -1880,6 +1944,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 
     [self setProjectRootURL:nil reload:YES];
     self.documentModel = [TMDocument documentWithBlankTemplate];
+    self.closedSessionPlaceholder = self.documentModel;
     [self loadDocumentIntoEditor];
     [self hidePDFSearchBar];
     [self showPDFIfExistsAtURL:nil];
@@ -2294,7 +2359,6 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 
 - (void)cleanAuxFilesAction:(id)sender {
     [self cleanAuxiliaryFilesForMainFile];
-    [self.statusBar showInfoMessage:@"已清理辅助文件"];
 }
 
 /// 清理的是实际编译的主文件（用 % !TEX root 或多文件项目时不是当前文件）。
@@ -2302,21 +2366,88 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     [self cleanAuxiliaryFilesForMainFileKeepingBibliography:NO];
 }
 
-/// keepBibliography：保留源文件旁的 .bbl（自动清理且它无法重新生成时）。
+/// 每份源文件的 .bbl 都独立检查能否重新生成，且覆盖全部产物目录。
 - (void)cleanAuxiliaryFilesForMainFileKeepingBibliography:(BOOL)keepBibliography {
+    [self beginAuxiliaryCleanupKeepingBibliography:keepBibliography rebuild:NO retryFile:nil failureHandler:nil];
+}
+
+- (void)beginAuxiliaryCleanupKeepingBibliography:(BOOL)keepBibliography rebuild:(BOOL)rebuild retryFile:(nullable NSString *)retryFile failureHandler:(nullable dispatch_block_t)failureHandler {
+    if (self.isCleaningAuxiliaryFiles) {
+        if (rebuild) self.compileAfterAuxiliaryCleanup = YES;
+        [self.statusBar showInfoMessage:@"正在清理辅助文件…"];
+        return;
+    }
     NSURL *main = [self mainFileURLForCompile];
-    if (!main) return;
-    // 缓存目录整个删掉；源文件旁的也清一遍（切换设置前或旧版本留下的）
-    [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:main] error:nil];
-    [TMDocument cleanAuxiliaryFilesForTeXFileURL:main keepingBibliography:keepBibliography];
-    if (![main isEqual:self.documentModel.fileURL]) [self.documentModel cleanAuxiliaryFiles];
-    [self.outlineSidebarView.fileBrowserView reload];
+    if (!main) {
+        [self.statusBar showInfoMessage:@"请先打开或编译文档"];
+        return;
+    }
+    NSURL *current = self.documentModel.fileURL;
+    NSArray<NSURL *> *sources = current && ![current.URLByStandardizingPath isEqual:main.URLByStandardizingPath] ? @[main, current] : @[main];
+    TMCompiler *compiler = TMCompiler.sharedCompiler;
+    BOOL besideSource = compiler.auxFilesBesideSource;
+    NSArray<NSString *> *arguments = [compiler.extraArguments copy];
+    NSUInteger generation = self.compilationContextGeneration;
+    self.isCleaningAuxiliaryFiles = YES;
+    self.compileAfterAuxiliaryCleanup = NO;
+    self.needsCompileAfterCurrent = NO;
+    [self.autoCompileTimer invalidate];
+    self.autoCompileTimer = nil;
+    [self.statusBar showInfoMessage:@"正在清理辅助文件…"];
+    if (compiler.isCompiling) [compiler cancelCompilation];
+    __weak typeof(self) weakSelf = self;
+    __block dispatch_block_t waitForCompiler;
+    waitForCompiler = ^{
+        typeof(self) self = weakSelf;
+        if (!self) { waitForCompiler = nil; return; }
+        if (compiler.hasActiveCompilationWork) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), waitForCompiler);
+            return;
+        }
+        waitForCompiler = nil;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            // .bbl 判定和实际删除都在后台，旧编译已退出，新编译由入口暂缓。
+            BOOL skipRetry = retryFile && [retryFile.pathExtension.lowercaseString isEqualToString:@"bbl"] &&
+                (keepBibliography || ![TMProject canRegenerateBibliographyForTeXFileURL:main]);
+            BOOL success = YES;
+            if (!skipRetry) for (NSURL *source in sources) {
+                // 用户的输出选项属于实际主文件，不能套到子文件目录后清理另一个项目。
+                BOOL isMain = [source isEqual:main];
+                TMCompilerOutputPaths *paths = [TMCompiler outputPathsForTeXFileURL:source
+                    auxFilesBesideSource:isMain ? besideSource : YES extraArguments:isMain ? arguments : @[]];
+                if (![TMAuxiliaryCleaner cleanAuxiliaryFilesForTeXFileURL:source outputPaths:paths
+                    legacyAuxiliaryDirectoryURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:source] keepingBibliography:keepBibliography]) success = NO;
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                typeof(self) self = weakSelf;
+                if (!self) return;
+                BOOL sameContext = generation == self.compilationContextGeneration;
+                BOOL requested = self.compileAfterAuxiliaryCleanup || (self.needsCompileAfterCurrent && self.autoCompileEnabled);
+                self.isCleaningAuxiliaryFiles = NO;
+                self.compileAfterAuxiliaryCleanup = NO;
+                self.needsCompileAfterCurrent = NO;
+                if (sameContext) {
+                    if (skipRetry && failureHandler) failureHandler();
+                    else {
+                        [self.statusBar showInfoMessage:success ? @"已清理辅助文件" : @"部分辅助文件无法清理，请检查目录权限"];
+                        [self.outlineSidebarView.fileBrowserView reload];
+                    }
+                }
+                if (requested || (sameContext && rebuild && !skipRetry)) {
+                    [self compileCurrentDocument];
+                    if (sameContext && retryFile && !skipRetry && [self isCompiling]) {
+                        self.isRetryingAfterAutoClean = YES;
+                        [self.logDrawer appendLogText:[NSString stringWithFormat:@"TeXMini：第一个错误出在 %@，已清理辅助文件并重新编译。\n\n", retryFile]];
+                    }
+                }
+            });
+        });
+    };
+    waitForCompiler();
 }
 
 - (void)cleanAndRebuild {
-    if ([self isCompiling]) [self cancelCompilation];
-    [self cleanAuxiliaryFilesForMainFile];
-    [self compileCurrentDocument];
+    [self beginAuxiliaryCleanupKeepingBibliography:NO rebuild:YES retryFile:nil failureHandler:nil];
 }
 
 - (void)exportPDFToolbarAction:(id)sender {

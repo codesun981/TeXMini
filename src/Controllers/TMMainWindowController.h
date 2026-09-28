@@ -25,6 +25,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)compileCurrentDocument;
 /// 删主文件的辅助文件后重新编译（aux 损坏、换 bib 后引用不更新时用）。
 - (void)cleanAndRebuild;
+/// 后台清理实际主文件的产物；等待旧编译结束，期间新的编译请求延后执行。
 - (void)cleanAuxiliaryFilesForMainFile;
 - (void)cancelCompilation;
 - (BOOL)isCompiling;

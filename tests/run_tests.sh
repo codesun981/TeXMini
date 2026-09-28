@@ -23,6 +23,7 @@ clang -fobjc-arc -mmacosx-version-min=14.0 -O0 -g -Wno-gnu-zero-variadic-macro-a
     src/Services/TMLogParser.m \
     src/Services/TMRecentFiles.m \
     src/Services/TMProject.m \
+    src/Services/TMAuxiliaryCleaner.m \
     src/Services/TMCompletionProvider.m \
     src/Services/TMPreferences.m \
     src/Services/TMCompiler.m \
@@ -48,3 +49,6 @@ if [ -x /Library/TeX/texbin/latexmk ] || command -v latexmk >/dev/null 2>&1; the
 else
     echo "integration: skipped (latexmk not found)"
 fi
+
+# 控制器流程使用替身，不创建窗口或驱动 GUI。
+bash tests/run_controller_tests.sh
