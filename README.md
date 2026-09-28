@@ -2,6 +2,12 @@
 
 轻量的 macOS 原生 LaTeX 编辑器，使用 Objective-C、AppKit 和 PDFKit。左侧写作，右侧预览 PDF；支持语法高亮、大纲、文件侧栏、补全、错误行跳转和 SyncTeX 双向定位。
 
+## 界面预览
+
+![TeXMini 界面：左侧为大纲与项目文件，中间为 LaTeX 编辑器，右侧为 PDF 预览](resources/texmini-interface.png)
+
+左侧通过大纲和文件列表快速定位章节与项目文件，中间编辑 LaTeX 源码，右侧查看编译后的 PDF。底部显示文档信息、编译引擎和日志入口，在同一窗口完成写作、编译与预览。
+
 ## 下载与安装
 
 从 [GitHub Releases 下载最新版](https://github.com/codesun981/TeXMini/releases/latest)，最低要求 **macOS 14**。Apple Silicon Mac 选择文件名含 `arm64` 的安装包，Intel Mac 选择含 `x86_64` 的安装包。两种架构分别构建，不是 Universal 二进制。
