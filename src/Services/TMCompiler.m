@@ -1,3 +1,4 @@
+#import "TMDocument.h"
 #import "TMCompiler.h"
 #import "TMMagicComments.h"
 #import <CommonCrypto/CommonDigest.h>
@@ -5,8 +6,53 @@
 #import <signal.h>
 #include <sys/stat.h>
 
+@interface TMCompilerOutputPaths ()
+@property (nonatomic, readwrite) NSURL *outputDirectoryURL;
+@property (nonatomic, readwrite) NSURL *auxiliaryDirectoryURL;
+@property (nonatomic, readwrite) NSString *jobName;
+@property (nonatomic, readwrite) BOOL usesManagedAuxiliaryDirectory;
+@end
+
+@implementation TMCompilerOutputPaths
+- (NSURL *)outputFileURLWithExtension:(NSString *)extension {
+    return [self.outputDirectoryURL URLByAppendingPathComponent:[self.jobName stringByAppendingPathExtension:extension]];
+}
+- (NSURL *)auxiliaryFileURLWithExtension:(NSString *)extension {
+    return [self.auxiliaryDirectoryURL URLByAppendingPathComponent:[self.jobName stringByAppendingPathExtension:extension]];
+}
+- (NSURL *)pdfURL { return [self outputFileURLWithExtension:@"pdf"]; }
+- (NSURL *)synctexURL { return [self outputFileURLWithExtension:@"synctex.gz"]; }
+@end
+
+/// 把路径选项与其他参数分开；命令行和产物定位必须使用同一份解析结果。
+static NSDictionary<NSString *, NSString *> *TMOutputOptions(NSArray<NSString *> *arguments, NSMutableArray<NSString *> *remaining) {
+    NSMutableDictionary *options = [NSMutableDictionary dictionary];
+    for (NSUInteger i = 0; i < arguments.count; i++) {
+        NSString *argument = arguments[i];
+        NSString *option = [argument hasPrefix:@"--"] ? [argument substringFromIndex:2]
+                         : [argument hasPrefix:@"-"] ? [argument substringFromIndex:1] : @"";
+        NSRange equals = [option rangeOfString:@"="];
+        NSString *name = equals.location == NSNotFound ? option : [option substringToIndex:equals.location];
+        NSString *key = ([name isEqualToString:@"outdir"] || [name isEqualToString:@"output-directory"]) ? @"output"
+                      : ([name isEqualToString:@"auxdir"] || [name isEqualToString:@"aux-directory"]) ? @"auxiliary"
+                      : [name isEqualToString:@"jobname"] ? @"job" : nil;
+        if (!key || (equals.location == NSNotFound && (i + 1 == arguments.count || [arguments[i + 1] hasPrefix:@"-"]))) {
+            if (remaining) [remaining addObject:argument];
+            continue;
+        }
+        options[key] = equals.location == NSNotFound ? arguments[++i] : [option substringFromIndex:equals.location + 1];
+    }
+    return options;
+}
+
+static NSURL *TMOutputDirectoryURL(NSString *path, NSURL *relativeTo) {
+    if (path.length == 0) return relativeTo;
+    return [NSURL fileURLWithPath:path.stringByExpandingTildeInPath isDirectory:YES relativeToURL:relativeTo].URLByStandardizingPath.absoluteURL;
+}
+
 @interface TMCompiler ()
 @property (nonatomic, assign) BOOL isCompiling;
+@property (nonatomic) NSUInteger activeCompilationCount;
 @property (nonatomic, assign) BOOL wasCancelled;
 @property (nonatomic, strong) NSTask *currentTask;
 @property (nonatomic, strong) NSCache<NSArray *, NSArray *> *engineDecisionCache;
@@ -379,6 +425,23 @@ static void TMTerminateProcessTree(pid_t pid) {
     return [[[caches URLByAppendingPathComponent:@"TeXMini"] URLByAppendingPathComponent:@"build"] URLByAppendingPathComponent:name isDirectory:YES];
 }
 
++ (TMCompilerOutputPaths *)outputPathsForTeXFileURL:(NSURL *)texFileURL
+                               auxFilesBesideSource:(BOOL)auxFilesBesideSource
+                                     extraArguments:(NSArray<NSString *> *)extraArguments {
+    NSDictionary *options = TMOutputOptions(extraArguments, nil);
+    NSURL *sourceDirectory = texFileURL.URLByDeletingLastPathComponent.URLByStandardizingPath;
+    TMCompilerOutputPaths *paths = [TMCompilerOutputPaths new];
+    paths.outputDirectoryURL = TMOutputDirectoryURL(options[@"output"], sourceDirectory);
+    paths.usesManagedAuxiliaryDirectory = !auxFilesBesideSource && !options[@"auxiliary"];
+    paths.auxiliaryDirectoryURL = options[@"auxiliary"]
+        ? TMOutputDirectoryURL(options[@"auxiliary"], [options[@"auxiliary"] length] ? sourceDirectory : paths.outputDirectoryURL)
+        : auxFilesBesideSource ? paths.outputDirectoryURL : [self auxiliaryDirectoryForTeXFileURL:texFileURL];
+    NSString *baseName = texFileURL.URLByDeletingPathExtension.lastPathComponent;
+    NSString *jobName = [options[@"job"] stringByReplacingOccurrencesOfString:@"%A" withString:baseName];
+    paths.jobName = jobName.length ? jobName : baseName;
+    return paths;
+}
+
 + (NSArray<NSString *> *)argumentsForEngineName:(NSString *)engineName
                                      useLatexmk:(BOOL)useLatexmk
                                       outputDir:(NSString *)outputDir
@@ -411,6 +474,10 @@ static void TMTerminateProcessTree(pid_t pid) {
 
 #pragma mark - 编译
 
+- (BOOL)hasActiveCompilationWork {
+    return self.activeCompilationCount > 0;
+}
+
 - (void)cancelCompilation {
     if (self.isCompiling && self.currentTask) {
         self.wasCancelled = YES;
@@ -438,13 +505,13 @@ static void TMTerminateProcessTree(pid_t pid) {
         [self cancelCompilationAndDiscardResults];
     }
 
-    NSString *content = [NSString stringWithContentsOfURL:texFileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
+    NSString *content = [TMDocument documentWithContentsOfURL:texFileURL error:nil].content ?: @"";
 
     // 1. 魔法注释 root：改为编译主文件
     NSURL *rootURL = [TMMagicComments rootFileURLForDocumentURL:texFileURL content:content];
     if (rootURL && [[NSFileManager defaultManager] fileExistsAtPath:rootURL.path]) {
         texFileURL = rootURL;
-        content = [NSString stringWithContentsOfURL:texFileURL encoding:NSUTF8StringEncoding error:nil] ?: content;
+        content = [TMDocument documentWithContentsOfURL:texFileURL error:nil].content ?: content;
     }
 
     // 2. 决定引擎与命令行
@@ -453,28 +520,17 @@ static void TMTerminateProcessTree(pid_t pid) {
     NSString *enginePath = [self.class findExecutableNamed:engineName];
 
     NSString *workingDir = [texFileURL URLByDeletingLastPathComponent].path;
-    NSString *auxDir = nil;
-    if (!self.auxFilesBesideSource) {
-        NSURL *auxURL = [TMCompiler auxiliaryDirectoryForTeXFileURL:texFileURL];
-        // 建不出缓存目录就退回老行为，总比编译不了好
-        if ([[NSFileManager defaultManager] createDirectoryAtURL:auxURL withIntermediateDirectories:YES attributes:nil error:nil]) {
-            auxDir = auxURL.path;
-        }
-    }
+    TMCompilerOutputPaths *paths = [self.class outputPathsForTeXFileURL:texFileURL
+                                                   auxFilesBesideSource:self.auxFilesBesideSource
+                                                         extraArguments:self.extraArguments];
     NSString *fileName = texFileURL.lastPathComponent;
-    NSString *baseName = [texFileURL.URLByDeletingPathExtension lastPathComponent];
-    NSURL *expectedPDFURL = [[texFileURL URLByDeletingLastPathComponent] URLByAppendingPathComponent:[baseName stringByAppendingPathExtension:@"pdf"]];
+    NSURL *expectedPDFURL = paths.pdfURL;
+    NSMutableArray<NSString *> *extraArguments = [NSMutableArray array];
+    TMOutputOptions(self.extraArguments, extraArguments);
+    [extraArguments addObject:[@"-jobname=" stringByAppendingString:paths.jobName]];
+    BOOL shellEscape = self.shellEscapeEnabled;
 
     NSString *execPath = latexmkPath ?: enginePath;
-    NSArray<NSString *> *args = execPath
-        ? [TMCompiler argumentsForEngineName:engineName
-                                  useLatexmk:(latexmkPath != nil)
-                                   outputDir:workingDir
-                                      auxDir:auxDir
-                                    fileName:fileName
-                                 shellEscape:self.shellEscapeEnabled
-                              extraArguments:self.extraArguments]
-        : @[];
 
     if (!execPath) {
         if ([self.delegate respondsToSelector:@selector(compilerDidFailWithError:line:fullLog:issues:)]) {
@@ -496,7 +552,6 @@ static void TMTerminateProcessTree(pid_t pid) {
     NSTask *task = [self newCompilationTask];
     task.executableURL = [NSURL fileURLWithPath:execPath];
     task.currentDirectoryURL = [NSURL fileURLWithPath:workingDir];
-    task.arguments = args;
 
     // 关键：注入 TeX PATH，GUI App 默认拿不到 shell 的环境
     NSMutableDictionary *env = [NSMutableDictionary dictionaryWithDictionary:[NSProcessInfo processInfo].environment];
@@ -509,15 +564,32 @@ static void TMTerminateProcessTree(pid_t pid) {
     task.standardOutput = pipe;
     task.standardError = pipe;
     self.currentTask = task;
+    self.activeCompilationCount++;
 
     NSMutableString *fullOutput = [NSMutableString string];
     NSFileHandle *readHandle = pipe.fileHandleForReading;
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSError *launchError = nil;
-        [task launchAndReturnError:&launchError];
+        NSFileManager *fm = NSFileManager.defaultManager;
+        NSString *auxDir = paths.auxiliaryDirectoryURL.path;
+        BOOL outputReady = [fm createDirectoryAtURL:paths.outputDirectoryURL withIntermediateDirectories:YES attributes:nil error:&launchError];
+        if (outputReady && ![fm createDirectoryAtURL:paths.auxiliaryDirectoryURL withIntermediateDirectories:YES attributes:nil error:&launchError]) {
+            if (paths.usesManagedAuxiliaryDirectory) {
+                // 系统缓存不可写时仍可编译；用户显式指定的目录失败则报告实际错误。
+                auxDir = paths.outputDirectoryURL.path;
+                launchError = nil;
+            }
+        }
+        if (!launchError) {
+            task.arguments = [TMCompiler argumentsForEngineName:engineName useLatexmk:(latexmkPath != nil)
+                                                      outputDir:paths.outputDirectoryURL.path auxDir:auxDir fileName:fileName
+                                                   shellEscape:shellEscape extraArguments:extraArguments];
+            [task launchAndReturnError:&launchError];
+        }
         if (launchError) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                self.activeCompilationCount--;
                 if (self.currentTask != task) return;
                 self.isCompiling = NO;
                 self.currentTask = nil;
@@ -578,6 +650,7 @@ static void TMTerminateProcessTree(pid_t pid) {
         NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:startTime];
 
         dispatch_async(dispatch_get_main_queue(), ^{
+            self.activeCompilationCount--;
             // 这个回调属于已被取消/替换的旧任务
             if (self.currentTask != task) return;
 
@@ -592,28 +665,34 @@ static void TMTerminateProcessTree(pid_t pid) {
                 return;
             }
 
-            // 没有 latexmk 时引擎把 PDF 也写进了缓存目录，拷回源文件旁
-            if (!latexmkPath && auxDir) {
+            // 没有 latexmk 时引擎只能用一个目录；成功后把 PDF/SyncTeX 放到实际输出目录。
+            NSError *outputError = nil;
+            if (exitCode == 0 && !latexmkPath && ![auxDir isEqualToString:paths.outputDirectoryURL.path]) {
                 for (NSString *ext in @[@"pdf", @"synctex.gz"]) {
-                    NSString *name = [baseName stringByAppendingPathExtension:ext];
+                    NSString *name = [paths.jobName stringByAppendingPathExtension:ext];
                     NSURL *from = [NSURL fileURLWithPath:[auxDir stringByAppendingPathComponent:name]];
-                    NSURL *to = [NSURL fileURLWithPath:[workingDir stringByAppendingPathComponent:name]];
-                    if (![[NSFileManager defaultManager] fileExistsAtPath:from.path]) continue;
-                    [[NSFileManager defaultManager] removeItemAtURL:to error:nil];
-                    [[NSFileManager defaultManager] moveItemAtURL:from toURL:to error:nil];
+                    NSURL *to = [paths outputFileURLWithExtension:ext];
+                    if (![fm fileExistsAtPath:from.path] && ![ext isEqualToString:@"pdf"]) continue;
+                    if ([fm fileExistsAtPath:to.path]) {
+                        [fm replaceItemAtURL:to withItemAtURL:from backupItemName:nil options:0 resultingItemURL:nil error:&outputError];
+                    } else {
+                        [fm moveItemAtURL:from toURL:to error:&outputError];
+                    }
+                    if (outputError) break;
                 }
             }
 
             NSArray<TMLogIssue *> *issues = [TMLogParser issuesFromLog:fullOutput];
             BOOL pdfExists = [[NSFileManager defaultManager] fileExistsAtPath:expectedPDFURL.path];
 
-            if (exitCode == 0 && pdfExists) {
+            if (exitCode == 0 && pdfExists && !outputError) {
                 if ([self.delegate respondsToSelector:@selector(compilerDidFinishSuccess:pdfURL:issues:)]) {
                     [self.delegate compilerDidFinishSuccess:elapsed pdfURL:expectedPDFURL issues:issues];
                 }
             } else {
                 TMLogIssue *firstError = [TMLogParser firstErrorInIssues:issues];
-                NSString *summary = firstError.message ?: @"编译未成功，请检查语法日志。";
+                NSString *summary = outputError ? [NSString stringWithFormat:@"无法保存编译产物：%@", outputError.localizedDescription]
+                                                : firstError.message ?: @"编译未成功，请检查语法日志。";
                 NSInteger line = firstError ? firstError.line : 0;
                 if ([self.delegate respondsToSelector:@selector(compilerDidFailWithError:line:fullLog:issues:)]) {
                     [self.delegate compilerDidFailWithError:summary line:line fullLog:fullOutput issues:issues];

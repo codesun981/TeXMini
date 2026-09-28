@@ -21,6 +21,19 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 - (void)compilerDidCancel;
 @end
 
+/// 编译产物的确定路径；不访问磁盘，供编译、预览与按文件名清理共同使用。
+@interface TMCompilerOutputPaths : NSObject
+@property (nonatomic, readonly) NSURL *outputDirectoryURL;
+@property (nonatomic, readonly) NSURL *auxiliaryDirectoryURL;
+@property (nonatomic, readonly) NSString *jobName;
+@property (nonatomic, readonly) NSURL *pdfURL;
+@property (nonatomic, readonly) NSURL *synctexURL;
+/// 只有 TeXMini 默认的专用缓存目录为 YES；用户指定的目录必须按产物文件逐个清理。
+@property (nonatomic, readonly) BOOL usesManagedAuxiliaryDirectory;
+- (NSURL *)outputFileURLWithExtension:(NSString *)extension;
+- (NSURL *)auxiliaryFileURLWithExtension:(NSString *)extension;
+@end
+
 @interface TMCompiler : NSObject
 
 @property (nonatomic, weak) id<TMCompilerDelegate> delegate;
@@ -32,6 +45,8 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 /// 追加到命令行末尾（文件名之前）的额外参数，例如 @[@"-outdir=build"]。
 @property (nonatomic, copy) NSArray<NSString *> *extraArguments;
 @property (nonatomic, readonly) BOOL isCompiling;
+/// 包括已丢弃但仍在启动、运行或排空管道的旧任务；清理辅助文件前必须等它为 NO。
+@property (nonatomic, readonly) BOOL hasActiveCompilationWork;
 
 + (instancetype)sharedCompiler;
 + (nullable NSString *)findExecutablePathForEngine:(TMTeXEngine)engine;
@@ -41,6 +56,12 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 /// 某个主文件的中间文件目录：~/Library/Caches/TeXMini/build/<文件名>-<路径哈希>/。
 /// 按完整路径区分，同名的 main.tex 在不同项目里互不干扰。不负责创建目录。
 + (NSURL *)auxiliaryDirectoryForTeXFileURL:(NSURL *)texFileURL;
+
+/// texFileURL 应已解析到主文件。支持 outdir/output-directory、auxdir/aux-directory、jobname，
+/// 接受 -/--、= 或分离的值，同类选项最后一次出现生效；jobname 的 %A 展开为主文件名。
++ (TMCompilerOutputPaths *)outputPathsForTeXFileURL:(NSURL *)texFileURL
+                               auxFilesBesideSource:(BOOL)auxFilesBesideSource
+                                     extraArguments:(nullable NSArray<NSString *> *)extraArguments;
 
 /// 组装命令行参数（不含可执行文件本身）。useLatexmk=YES 时第一个参数是 -pdf / -xelatex / -lualatex。
 /// PDF 与 .synctex.gz 写到 outputDir；auxDir 非空且与 outputDir 不同时，其余中间文件写到 auxDir。

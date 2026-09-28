@@ -25,17 +25,20 @@ NS_ASSUME_NONNULL_BEGIN
 /// 推断应当编译的主文件：
 /// 1. `% !TEX root` 魔法注释；
 /// 2. 当前文件自身含 \documentclass；
-/// 3. 同目录顶层 .tex 中含 \documentclass 的文件：优先 \input/\include/\subfile 了当前文件的那个，
-///    否则若只有一个候选就用它；
+/// 3. 当前目录及最多 8 层祖先中含 \documentclass 的文件，按完整路径追踪 \input/\include/\subfile/
+///    \import 依赖；只有一个明确引用当前文件的候选才采用它，循环/超大依赖图有界处理；
+///    无明确引用时，仅在当前或紧邻父目录只有一个候选的情况下回退；
 /// 4. 都不满足返回 nil（调用方回退到当前文件）。
 + (nullable NSURL *)mainFileURLForDocumentURL:(NSURL *)documentURL content:(NSString *)content;
 
 /// 在目录顶层寻找含 \documentclass 的 .tex 文件（用于“打开文件夹”）。
 /// 多个候选时优先 main.tex / thesis.tex / paper.tex 等常见名字，再退回引用其他文件最多的那个。
-/// 主文件的 .bbl 能否重新生成：主文件里（注释外）的 \bibliography{…} / \addbibresource{…} 指向的 .bib 至少有一个存在。
++ (nullable NSURL *)guessMainFileInDirectory:(NSURL *)directoryURL;
+
+/// 主文件的 .bbl 能否重新生成：主文件里（注释外）的 \bibliography{…} / \addbibresource{…}
+/// 必须至少声明一个来源，且每个来源都是可读的实际文件；宏展开或输入依赖无法完整确认时返回 NO。
 /// 从 arXiv 下载的源码常常只有 .bbl 没有 .bib，这种 .bbl 删掉就再也生成不出来。
 + (BOOL)canRegenerateBibliographyForTeXFileURL:(NSURL *)texURL;
-+ (nullable NSURL *)guessMainFileInDirectory:(NSURL *)directoryURL;
 
 @end
 

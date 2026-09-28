@@ -1,3 +1,4 @@
+#import "TMDocument.h"
 #import "TMCompileTargetResolver.h"
 #import "TMProject.h"
 #import "TMFormatActions.h"
@@ -78,7 +79,7 @@
     if (url && !scratch) main = [TMProject mainFileURLForDocumentURL:url content:content] ?: url;
     if (shouldCancel()) return nil;
     BOOL editingMain = !main || [main.URLByStandardizingPath.path isEqualToString:url.URLByStandardizingPath.path];
-    NSString *mainContent = editingMain ? content : ([NSString stringWithContentsOfURL:main encoding:NSUTF8StringEncoding error:nil] ?: @"");
+    NSString *mainContent = editingMain ? content : ([TMDocument documentWithContentsOfURL:main error:nil].content ?: @"");
     if (shouldCancel()) return nil;
     BOOL usesChapters = [TMFormatActions usesChaptersForMainContent:mainContent currentContent:content];
     if (shouldCancel()) return nil;

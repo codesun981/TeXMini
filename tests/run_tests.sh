@@ -4,7 +4,7 @@ set -e
 cd "$(dirname "$0")/.."
 mkdir -p build
 
-clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
+clang -fobjc-arc -mmacosx-version-min=14.0 -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     -framework Foundation \
     -framework CoreText \
     -Isrc/Models \
@@ -35,9 +35,10 @@ build/tmtests
 
 # 集成测试：需要 MacTeX（latexmk）。没有就跳过。
 if [ -x /Library/TeX/texbin/latexmk ] || command -v latexmk >/dev/null 2>&1; then
-    clang -fobjc-arc -O0 -g \
+    clang -fobjc-arc -mmacosx-version-min=14.0 -O0 -g \
         -framework Foundation \
-        -Isrc/Services \
+        -Isrc/Services -Isrc/Models \
+        src/Models/TMDocument.m \
         src/Services/TMCompiler.m \
         src/Services/TMMagicComments.m \
         src/Services/TMLogParser.m \

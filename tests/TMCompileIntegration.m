@@ -23,6 +23,14 @@
 }
 @end
 
+@interface TMDirectCompileTestCompiler : TMCompiler
+@end
+@implementation TMDirectCompileTestCompiler
++ (NSString *)findExecutableNamed:(NSString *)name {
+    return [name isEqualToString:@"latexmk"] ? nil : [super findExecutableNamed:name];
+}
+@end
+
 @interface TMCompileEngineProbe : TMCompileProbe
 @property (nonatomic, copy) NSString *engineName;
 @property (nonatomic) BOOL usesLatexmk;
@@ -53,7 +61,7 @@ static int failures = 0;
 
 int main(void) {
     @autoreleasepool {
-        NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:@"tmtest_integration"];
+        NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[@"tmtest_integration_" stringByAppendingString:NSUUID.UUID.UUIDString]];
         [[NSFileManager defaultManager] removeItemAtPath:dir error:nil];
         [[NSFileManager defaultManager] createDirectoryAtPath:[dir stringByAppendingPathComponent:@"ch"] withIntermediateDirectories:YES attributes:nil error:nil];
 
@@ -103,6 +111,63 @@ int main(void) {
         CHECK([probe3.engineName isEqualToString:@"xelatex"], "start callback should report actual xelatex decision");
         CHECK(probe3.usesLatexmk, "start callback should report latexmk scheduling");
         CHECK(!probe3.legacyStartCalled, "extended delegate must receive only one start callback");
+
+        // 4. 自定义产物路径：源目录有旧 PDF 和没有 PDF 时，都必须返回本次真正生成的文件。
+        compiler.engine = TMTeXEnginePDFLaTeX;
+        compiler.auxFilesBesideSource = YES;
+        NSArray *outputCases = @[
+            @{@"args": @[@"-outdir=build"], @"pdf": @"build/main.pdf"},
+            @{@"args": @[@"-jobname=renamed"], @"pdf": @"renamed.pdf"},
+            @{@"args": @[@"--output-directory", @"custom output", @"--jobname", @"%A-final"], @"pdf": @"custom output/main-final.pdf"}
+        ];
+        NSUInteger caseIndex = 0;
+        for (NSDictionary *outputCase in outputCases) {
+            for (NSNumber *hasOldPDF in @[@YES, @NO]) {
+                NSString *caseDir = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"output-%lu", (unsigned long)caseIndex++]];
+                [fm createDirectoryAtPath:caseDir withIntermediateDirectories:YES attributes:nil error:nil];
+                NSString *caseSource = [caseDir stringByAppendingPathComponent:@"main.tex"];
+                [@"\\documentclass{article}\n\\begin{document}\nNew output location.\\end{document}\n"
+                    writeToFile:caseSource atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                if (hasOldPDF.boolValue) {
+                    [fm copyItemAtPath:[dir stringByAppendingPathComponent:@"main.pdf"]
+                               toPath:[caseDir stringByAppendingPathComponent:@"main.pdf"] error:nil];
+                }
+                compiler.extraArguments = outputCase[@"args"];
+                TMCompileProbe *outputProbe = [TMCompileProbe new];
+                compiler.delegate = outputProbe;
+                [compiler compileFileAtURL:[NSURL fileURLWithPath:caseSource]];
+                CHECK(waitFor(outputProbe, 120), "custom output compile timed out");
+                CHECK(outputProbe.success, "custom output compile should succeed with or without an old PDF");
+                NSString *expectedPath = [caseDir stringByAppendingPathComponent:outputCase[@"pdf"]];
+                CHECK([outputProbe.pdfURL.path isEqualToString:expectedPath], "must return the generated custom PDF, never the old source PDF");
+                CHECK([fm fileExistsAtPath:expectedPath], "custom PDF must exist");
+                CHECK([fm fileExistsAtPath:[expectedPath.stringByDeletingPathExtension stringByAppendingPathExtension:@"synctex.gz"]], "SyncTeX must be alongside the custom PDF");
+            }
+        }
+        compiler.extraArguments = @[];
+        compiler.auxFilesBesideSource = NO;
+
+        // 5. 没有 latexmk 时，单遍引擎也遵循相同输出配置，并正确搬运产物。
+        TMCompiler *directCompiler = [TMDirectCompileTestCompiler new];
+        directCompiler.engine = TMTeXEnginePDFLaTeX;
+        directCompiler.extraArguments = @[@"-outdir=build", @"-auxdir=aux", @"-jobname=direct"];
+        for (NSNumber *hasOldPDF in @[@YES, @NO]) {
+            NSString *caseDir = [dir stringByAppendingPathComponent:[NSString stringWithFormat:@"direct-%@", hasOldPDF]];
+            [fm createDirectoryAtPath:[caseDir stringByAppendingPathComponent:@"build"] withIntermediateDirectories:YES attributes:nil error:nil];
+            NSString *caseSource = [caseDir stringByAppendingPathComponent:@"main.tex"];
+            [@"\\documentclass{article}\n\\begin{document}\nDirect engine output.\\end{document}\n"
+                writeToFile:caseSource atomically:YES encoding:NSUTF8StringEncoding error:nil];
+            NSString *expectedPath = [caseDir stringByAppendingPathComponent:@"build/direct.pdf"];
+            if (hasOldPDF.boolValue) [fm copyItemAtPath:[dir stringByAppendingPathComponent:@"main.pdf"] toPath:expectedPath error:nil];
+            TMCompileProbe *directProbe = [TMCompileProbe new];
+            directCompiler.delegate = directProbe;
+            [directCompiler compileFileAtURL:[NSURL fileURLWithPath:caseSource]];
+            CHECK(waitFor(directProbe, 120), "direct engine custom output timed out");
+            CHECK(directProbe.success, "direct engine custom output should succeed");
+            CHECK([directProbe.pdfURL.path isEqualToString:expectedPath], "direct engine must return the actual PDF");
+            CHECK([fm fileExistsAtPath:[caseDir stringByAppendingPathComponent:@"aux/direct.aux"]], "custom auxiliary directory should receive intermediate files");
+            CHECK([fm fileExistsAtPath:[caseDir stringByAppendingPathComponent:@"build/direct.synctex.gz"]], "direct engine SyncTeX should move with the PDF");
+        }
 
         for (NSString *name in @[@"main.tex", @"broken.tex"]) {
             [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]]] error:nil];

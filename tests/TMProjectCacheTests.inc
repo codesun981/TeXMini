@@ -3,7 +3,7 @@
 #include <fcntl.h>
 @interface TMProject (CacheTestHooks)
 + (BOOL)contentDeclaresDocumentClass:(NSString *)content;
-+ (NSSet<NSString *> *)referencedBaseNamesInContent:(NSString *)content;
++ (NSArray *)fileReferencesInContent:(NSString *)content;
 @end
 @interface TMCountingProject : TMProject
 @end
@@ -13,9 +13,9 @@ static NSUInteger tmProjectClassParses, tmProjectReferenceParses;
     tmProjectClassParses++;
     return [super contentDeclaresDocumentClass:content];
 }
-+ (NSSet<NSString *> *)referencedBaseNamesInContent:(NSString *)content {
++ (NSArray *)fileReferencesInContent:(NSString *)content {
     tmProjectReferenceParses++;
-    return [super referencedBaseNamesInContent:content];
+    return [super fileReferencesInContent:content];
 }
 @end
 
