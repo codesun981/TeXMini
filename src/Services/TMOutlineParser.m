@@ -5,50 +5,24 @@
 
 + (NSArray<TMOutlineItem *> *)parseOutlineFromLaTeXString:(NSString *)latexString
                                                  flatList:(NSArray<TMOutlineItem *> * _Nullable * _Nullable)outFlatList {
-    if (!latexString || latexString.length == 0) {
-        if (outFlatList) *outFlatList = @[];
-        return @[];
-    }
+    return [self parseOutlineFromScan:[TMLaTeXScanner scanString:latexString ?: @""]
+                            lineIndex:[[TMLineIndex alloc] initWithString:latexString ?: @""] flatList:outFlatList];
+}
 
-    // 1. 预先计算每行的起始字符索引，方便根据 match.range.location 快速计算行号
-    NSMutableArray<NSNumber *> *lineStarts = [NSMutableArray array];
-    [lineStarts addObject:@0];
-    for (NSUInteger i = 0; i < latexString.length; i++) {
-        if ([latexString characterAtIndex:i] == '\n') {
-            [lineStarts addObject:@(i + 1)];
-        }
-    }
-
-    // 辅助函数：根据字符索引获取 1-based 行号
-    NSInteger (^lineNumberForLocation)(NSUInteger) = ^NSInteger(NSUInteger loc) {
-        NSInteger low = 0;
-        NSInteger high = (NSInteger)lineStarts.count - 1;
-        while (low <= high) {
-            NSInteger mid = low + (high - low) / 2;
-            NSUInteger start = [lineStarts[mid] unsignedIntegerValue];
-            if (start <= loc) {
-                if (mid == (NSInteger)lineStarts.count - 1 || [lineStarts[mid + 1] unsignedIntegerValue] > loc) {
-                    return mid + 1;
-                }
-                low = mid + 1;
-            } else {
-                high = mid - 1;
-            }
-        }
-        return 1;
-    };
-
++ (NSArray<TMOutlineItem *> *)parseOutlineFromScan:(TMLaTeXScanResult *)scan
+                                       lineIndex:(TMLineIndex *)lineIndex
+                                        flatList:(NSArray<TMOutlineItem *> * _Nullable * _Nullable)outFlatList {
     // 2. 标题由统一扫描器给出：已跳过注释、代码块、\newcommand 定义体，认识 \section[短]{长}、
     //    包装标题命令的自定义命令以及 beamer 帧标题
     NSMutableArray<TMOutlineItem *> *flatItems = [NSMutableArray array];
-    for (TMLaTeXHeading *heading in [TMLaTeXScanner scanString:latexString].headings) {
+    for (TMLaTeXHeading *heading in scan.headings) {
         NSString *cleanTitle = [self cleanHeadingTitle:heading.rawTitle];
         if (cleanTitle.length == 0) {
             cleanTitle = [NSString stringWithFormat:@"未命名 %@", heading.commandName];
         }
         TMOutlineItem *item = [[TMOutlineItem alloc] initWithTitle:cleanTitle
                                                              level:heading.level
-                                                        lineNumber:lineNumberForLocation(heading.location)
+                                                        lineNumber:[lineIndex lineNumberForCharacterIndex:heading.location]
                                                       charLocation:heading.location];
         [flatItems addObject:item];
     }

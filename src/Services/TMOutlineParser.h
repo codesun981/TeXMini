@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 #import "TMOutlineItem.h"
+#import "TMLineIndex.h"
+#import "TMLaTeXScanner.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -13,6 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
  */
 + (NSArray<TMOutlineItem *> *)parseOutlineFromLaTeXString:(NSString *)latexString
                                                  flatList:(NSArray<TMOutlineItem *> * _Nullable * _Nullable)outFlatList;
+
+/// 使用同一文本版本已有的扫描结果与行首索引，不再扫描全文。空扫描返回空大纲。
++ (NSArray<TMOutlineItem *> *)parseOutlineFromScan:(nullable TMLaTeXScanResult *)scan
+                                       lineIndex:(TMLineIndex *)lineIndex
+                                        flatList:(NSArray<TMOutlineItem *> * _Nullable * _Nullable)outFlatList;
 
 /**
  * 根据源码光标行号，快速查找当前光标所处的章节项

@@ -689,6 +689,9 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)loadDocumentIntoEditor {
     if (self.documentModel) {
         self.editorTextView.completionDocumentKey = self.documentModel.isScratch ? nil : self.documentModel.fileURL.URLByStandardizingPath.path;
+        // 先确定新文档语法，只失效扫描缓存，不用新语法重画即将被替换的旧正文。
+        TMEditorSyntax syntax = [TMLaTeXHighlighter syntaxForFileURL:self.documentModel.isScratch ? nil : self.documentModel.fileURL];
+        [TMLaTeXHighlighter setSyntax:syntax forTextStorage:self.editorTextView.textStorage];
         self.editorTextView.string = self.documentModel.content ?: @"";
         [self.editorTextView.undoManager removeAllActions];
         [self.editorTextView rehighlightAll];
@@ -1921,7 +1924,13 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 - (void)updateOutline {
     NSString *content = self.editorTextView.string;
     NSArray<TMOutlineItem *> *flatList = nil;
-    NSArray<TMOutlineItem *> *rootItems = [TMOutlineParser parseOutlineFromLaTeXString:content flatList:&flatList];
+    NSArray<TMOutlineItem *> *rootItems;
+    if (self.editorTextView.syntax == TMEditorSyntaxLaTeX) {
+        rootItems = [TMOutlineParser parseOutlineFromScan:self.editorTextView.currentLaTeXScan
+                                              lineIndex:self.editorTextView.lineIndex flatList:&flatList];
+    } else {
+        rootItems = [TMOutlineParser parseOutlineFromLaTeXString:content flatList:&flatList];
+    }
     [self.outlineSidebarView updateWithRootItems:rootItems flatItems:flatList];
     [self.outlineSidebarView highlightItemForLineNumber:self.currentCursorLine];
     [self updateWordCount];

@@ -337,6 +337,18 @@ static unichar TMMatchingBracket(unichar c) {
     [TMLaTeXHighlighter highlightTextStorage:self.textStorage inRange:range];
 }
 
+- (TMLaTeXScanResult *)currentLaTeXScan {
+    if (![self isLaTeX] || self.textStorage.length == 0) return nil;
+    // 由高亮统一维护扫描与上一次着色的结构摘要；大纲不能提前覆盖该摘要。
+    [self flushPendingHighlight];
+    TMLaTeXScanResult *scan = [TMLaTeXHighlighter lastScanForTextStorage:self.textStorage];
+    if (!scan) {
+        [self rehighlightAll];
+        scan = [TMLaTeXHighlighter lastScanForTextStorage:self.textStorage];
+    }
+    return scan;
+}
+
 #pragma mark - 可撤销的整行替换
 
 /// 把 range 所在的整行区域替换为 transform 的结果，注册撤销，并让选区覆盖替换后的文本。
