@@ -30,9 +30,12 @@ typedef NS_ENUM(NSInteger, TMPDFFitMode) {
 @property (nonatomic, assign) TMPDFFitMode fitMode;
 
 - (void)setupPDFView;
-- (void)loadPDFFromURL:(NSURL *)url;
-/// preserve=YES 时保留当前页与滚动位置（用于重新编译后刷新）。
-- (void)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve;
+/// 加载成功返回 YES；失败时清空旧 PDF 并返回 NO。
+- (BOOL)loadPDFFromURL:(NSURL *)url;
+/// preserve=YES 时为同一 PDF 保留当前页与滚动位置（用于重新编译后刷新）。
+- (BOOL)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve;
+/// 清空文档、选区和高亮，同时使旧文档尚未执行的界面更新失效。
+- (void)clearPDF;
 - (void)flashHighlightRect:(NSRect)pageRect onPageAtIndex:(NSInteger)pageIndex;
 
 @end

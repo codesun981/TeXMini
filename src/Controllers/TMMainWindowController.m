@@ -85,6 +85,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong) NSSearchField *pdfSearchField;
 @property (nonatomic, strong) NSTextField *pdfSearchCountLabel;
 @property (nonatomic, copy) NSArray<PDFSelection *> *pdfSearchResults;
+@property (nonatomic, weak, nullable) PDFDocument *pdfSearchDocument;
 @property (nonatomic, assign) NSInteger pdfSearchIndex;
 @property (nonatomic, strong) TMStatusBarView *statusBar;
 @property (nonatomic, strong) TMLogDrawerView *logDrawer;
@@ -513,12 +514,20 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)hidePDFSearchBar {
+    [self clearPDFSearchResults];
     if (self.pdfSearchBar.hidden) return;
     self.pdfSearchBar.hidden = YES;
     self.pdfView.frame = self.pdfContainerView.bounds;
-    self.pdfSearchResults = @[];
-    self.pdfView.highlightedSelections = nil;
     [self.window makeFirstResponder:self.pdfView];
+}
+
+- (void)clearPDFSearchResults {
+    self.pdfSearchResults = @[];
+    self.pdfSearchDocument = nil;
+    self.pdfSearchIndex = -1;
+    self.pdfSearchCountLabel.stringValue = @"";
+    self.pdfView.highlightedSelections = nil;
+    self.pdfView.currentSelection = nil;
 }
 
 - (void)pdfViewDidRequestFindInterface {
@@ -555,14 +564,13 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)runPDFSearchScrollToFirst:(BOOL)scroll {
     NSString *query = self.pdfSearchField.stringValue;
     PDFDocument *doc = self.pdfView.document;
+    [self clearPDFSearchResults];
     if (!doc || query.length == 0) {
-        self.pdfSearchResults = @[];
-        self.pdfView.highlightedSelections = nil;
-        self.pdfSearchCountLabel.stringValue = @"";
         return;
     }
     NSArray<PDFSelection *> *results = [doc findString:query withOptions:NSCaseInsensitiveSearch];
     self.pdfSearchResults = results;
+    self.pdfSearchDocument = doc;
     for (PDFSelection *s in results) s.color = [[NSColor systemYellowColor] colorWithAlphaComponent:0.5];
     self.pdfView.highlightedSelections = results;
     self.pdfSearchIndex = -1;
@@ -570,6 +578,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         self.pdfSearchCountLabel.stringValue = @"无结果";
         return;
     }
+    self.pdfSearchCountLabel.stringValue = [NSString stringWithFormat:@"%ld 个结果", (long)results.count];
     if (scroll) {
         // 从当前页开始找第一个命中，而不是总跳回第一页
         PDFPage *current = self.pdfView.currentPage;
@@ -585,9 +594,13 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)stepPDFSearch:(NSInteger)delta {
+    if (self.pdfSearchDocument != self.pdfView.document) {
+        [self runPDFSearchScrollToFirst:NO];
+    }
     NSInteger n = (NSInteger)self.pdfSearchResults.count;
     if (n == 0) return;
-    self.pdfSearchIndex = ((self.pdfSearchIndex + delta) % n + n) % n;
+    self.pdfSearchIndex = self.pdfSearchIndex < 0 ? (delta > 0 ? 0 : n - 1)
+        : ((self.pdfSearchIndex + delta) % n + n) % n;
     PDFSelection *sel = self.pdfSearchResults[self.pdfSearchIndex];
     self.pdfView.currentSelection = sel;
     [self.pdfView scrollSelectionToVisible:nil];
@@ -962,12 +975,12 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 /// 若 url 处已有 PDF 就载入预览并记为 currentPDFURL；否则显示占位提示。
 - (void)showPDFIfExistsAtURL:(nullable NSURL *)url {
-    if (url && [[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+    if (url && [[NSFileManager defaultManager] fileExistsAtPath:url.path] && [self.pdfView loadPDFFromURL:url]) {
         self.currentPDFURL = url;
-        [self.pdfView loadPDFFromURL:url];
         self.pdfPlaceholderView.hidden = YES;
     } else {
         self.currentPDFURL = nil;
+        [self.pdfView clearPDF];
         self.pdfPlaceholderView.hidden = NO;
     }
 }
@@ -1443,11 +1456,11 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     self.lastIssues = issues;
     [self.logDrawer setIssues:issues];
     [self refreshIssueMarks];
-    self.currentPDFURL = pdfURL;
-    self.pdfPlaceholderView.hidden = YES;
-    [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
-    // 搜索栏开着时对新 PDF 重新查找，高亮不丢
-    if (!self.pdfSearchBar.hidden) [self runPDFSearchScrollToFirst:NO];
+    BOOL loaded = [self.pdfView loadPDFFromURL:pdfURL preservingViewport:YES];
+    self.currentPDFURL = loaded ? pdfURL : nil;
+    self.pdfPlaceholderView.hidden = loaded;
+    // 当前文档重新编译后继续显示搜索高亮。
+    if (loaded && !self.pdfSearchBar.hidden) [self runPDFSearchScrollToFirst:NO];
     [self.outlineSidebarView.fileBrowserView reload];
     [self runPendingAutoCompileIfNeeded];
 }
@@ -2051,6 +2064,11 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 #pragma mark - PDF 导航与打印
 
 - (void)pdfPageDidChange:(NSNotification *)note {
+    if ([note.name isEqualToString:PDFViewDocumentChangedNotification]) {
+        // 搜索项属于具体的 PDFDocument；先丢弃旧结果，下一次查找时再搜索新 PDF。
+        // 切换文件时不额外同步扫描整份 PDF。
+        [self clearPDFSearchResults];
+    }
     PDFDocument *doc = self.pdfView.document;
     if (!doc) {
         [self.statusBar setPageIndex:0 pageCount:0];

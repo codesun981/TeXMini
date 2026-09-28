@@ -22,6 +22,7 @@
 
 @implementation TMPDFView {
     TMHighlightOverlayView *_currentOverlay;
+    NSUInteger _highlightGeneration;
 }
 
 - (void)setupPDFView {
@@ -132,22 +133,39 @@ static NSDate *TMFileModificationDate(NSURL *url) {
     return [[NSFileManager defaultManager] attributesOfItemAtPath:url.path error:nil][NSFileModificationDate];
 }
 
-- (void)loadPDFFromURL:(NSURL *)url {
+- (void)clearPDF {
+    self.currentPDFURL = nil;
+    self.loadedModificationDate = nil;
+    [self clearSelection];
+    self.highlightedSelections = nil;
+    [self removeOverlayIfAny];
+    self.document = nil;
+}
+
+- (BOOL)loadPDFFromURL:(NSURL *)url {
     // 同一项目里切换 .tex 时预览的往往是同一份 main.pdf：没重新生成就不动它（避免闪烁、不跳回第一页），
     // 生成过就按保留视口的方式刷新
     if (self.document && [url.URLByStandardizingPath isEqual:self.currentPDFURL.URLByStandardizingPath]) {
         NSDate *modified = TMFileModificationDate(url);
-        if (modified && [modified isEqualToDate:self.loadedModificationDate]) return;
-        [self loadPDFFromURL:url preservingViewport:YES];
-        return;
+        if (modified && [modified isEqualToDate:self.loadedModificationDate]) return YES;
+        return [self loadPDFFromURL:url preservingViewport:YES];
     }
-    [self loadPDFFromURL:url preservingViewport:NO];
+    return [self loadPDFFromURL:url preservingViewport:NO];
 }
 
-- (void)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve {
+- (BOOL)loadPDFFromURL:(NSURL *)url preservingViewport:(BOOL)preserve {
     NSDate *modified = TMFileModificationDate(url);
     PDFDocument *newDoc = [[PDFDocument alloc] initWithURL:url];
-    if (!newDoc) return;
+    if (!newDoc || newDoc.pageCount == 0) {
+        [self clearPDF];
+        return NO;
+    }
+
+    preserve = preserve && self.document &&
+        [url.URLByStandardizingPath isEqual:self.currentPDFURL.URLByStandardizingPath];
+    [self clearSelection];
+    self.highlightedSelections = nil;
+    [self removeOverlayIfAny];
 
     self.currentPDFURL = url;
     self.loadedModificationDate = modified;
@@ -156,8 +174,10 @@ static NSDate *TMFileModificationDate(NSURL *url) {
         self.document = newDoc;
         [self applyFitMode];
         // 文档刚换上时 PDFKit 还没排版完，下一轮再适配一次
-        dispatch_async(dispatch_get_main_queue(), ^{ [self applyFitMode]; });
-        return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (self.document == newDoc) [self applyFitMode];
+        });
+        return YES;
     }
 
     // 记录旧视口：当前页索引 + 滚动偏移，必须在替换 document 之前取。
@@ -170,6 +190,7 @@ static NSDate *TMFileModificationDate(NSURL *url) {
     self.document = newDoc;
 
     void (^restore)(void) = ^{
+        if (self.document != newDoc) return;
         // 适配整页 / 宽度时按新文档重新算；手动缩放则保持原比例
         if (self.fitMode == TMPDFFitManual) {
             self.autoScales = NO;
@@ -191,6 +212,7 @@ static NSDate *TMFileModificationDate(NSURL *url) {
     restore();
     // PDFView 替换文档后会异步重新布局并回到首页，下一轮 runloop 再恢复一次。
     dispatch_async(dispatch_get_main_queue(), restore);
+    return YES;
 }
 
 - (void)mouseDown:(NSEvent *)event {
@@ -216,17 +238,20 @@ static NSDate *TMFileModificationDate(NSURL *url) {
 }
 
 - (void)flashHighlightRect:(NSRect)pageRect onPageAtIndex:(NSInteger)pageIndex {
-    if (!self.document || pageIndex >= (NSInteger)self.document.pageCount) return;
+    PDFDocument *document = self.document;
+    if (!document || pageIndex < 0 || pageIndex >= (NSInteger)document.pageCount) return;
 
-    PDFPage *page = [self.document pageAtIndex:pageIndex];
+    PDFPage *page = [document pageAtIndex:pageIndex];
     if (!page) return;
 
     [self removeOverlayIfAny];
+    NSUInteger generation = _highlightGeneration;
     [self scrollToCenterPageRect:pageRect onPage:page];
 
     // 等这一轮布局结束再画高亮，convertRect:fromPage: 才是滚动后的坐标
     dispatch_async(dispatch_get_main_queue(), ^{
-        [self removeOverlayIfAny]; // 同一轮里若有多次请求，只保留最后一个
+        // 切换 PDF、滚动或后续跳转都可能发生在布局之前，只保留仍有效的最后一次请求。
+        if (self.document != document || generation != self->_highlightGeneration) return;
         NSRect viewRect = NSInsetRect([self convertRect:pageRect fromPage:page], -3, -1);
         TMHighlightOverlayView *overlay = [[TMHighlightOverlayView alloc] initWithFrame:viewRect];
         overlay.wantsLayer = YES;
@@ -280,6 +305,7 @@ static NSDate *TMFileModificationDate(NSURL *url) {
 }
 
 - (void)removeOverlayIfAny {
+    _highlightGeneration++;
     if (_currentOverlay) {
         [_currentOverlay removeFromSuperview];
         _currentOverlay = nil;
