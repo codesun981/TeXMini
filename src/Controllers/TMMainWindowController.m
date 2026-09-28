@@ -17,6 +17,7 @@
 #import "TMFontFixController.h"
 #import "TMTemplatePicker.h"
 #import "TMWelcomeView.h"
+#import "TMPreferencesWindowController.h"
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 static NSString *const kTMDefaultsOutlineCollapsed = @"TMOutlineCollapsed";
@@ -618,6 +619,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     }
     self.pdfView.inverted = p.pdfInverted;
     self.editorTextView.highlightsCurrentLine = p.highlightsCurrentLine;
+    self.outlineSidebarView.combinedMode = p.combinedSidebar;
 
     _autoCompileEnabled = p.autoCompileEnabled;
     if (!_autoCompileEnabled) {
@@ -714,6 +716,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)syncProjectRootWithDocument {
     NSURL *fileURL = self.documentModel.fileURL;
     if (!fileURL || self.documentModel.isScratch) {
+        // 未命名 / 暂存文档不属于旧项目，避免侧边栏继续显示上一个项目的文件。
+        [self setProjectRootURL:nil reload:YES];
         [self.outlineSidebarView.fileBrowserView selectFileURL:nil];
         return;
     }
@@ -1748,10 +1752,14 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     [self.window makeFirstResponder:self.editorTextView];
 }
 
-/// 记下当前项目文件夹、文件与光标；没有正式文件也没有项目文件夹时不覆盖上次的记录。
+/// 记下当前项目文件夹、文件与光标；未命名文档会清除上一次启动会话。
 - (void)saveSessionState {
     NSURL *file = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
-    if (!file && !self.projectRootURL) return;
+    if (!file && !self.projectRootURL) {
+        // 当前是全新的未命名文档：不要把上一个项目留作下次启动的会话。
+        [TMRecentFiles noteSessionFolderURL:nil fileURL:nil selection:0];
+        return;
+    }
     [TMRecentFiles noteSessionFolderURL:self.projectRootURL fileURL:file selection:self.editorTextView.selectedRange.location];
 }
 
@@ -2025,18 +2033,18 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     return [self toolbarDefaultItemIdentifiers:toolbar];
 }
 
-/// 顺序：编译 | 新建 模板 打开 | 导出 清理 | …… | 放大 缩小 | 侧栏折叠（右上角）。
+/// 顺序：编译、新建、模板、打开、导出、清理、设置 | …… | 放大、缩小、整页、大纲（右上角）。
+/// 左侧操作按钮保持连续，弹性空格只把 PDF 视图操作推到右侧。
 /// 保存 / 同步 / 日志按钮已删：⌘S、双击、状态栏"编译日志"够用。
 - (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
     return @[
         @"CompileDoc",
-        NSToolbarSpaceItemIdentifier,
         @"NewDoc",
         @"TemplateDoc",
         @"OpenDoc",
-        NSToolbarSpaceItemIdentifier,
         @"ExportPDF",
         @"CleanAux",
+        @"Preferences",
         NSToolbarFlexibleSpaceItemIdentifier,
         @"ZoomIn",
         @"ZoomOut",
@@ -2097,6 +2105,13 @@ static NSString *TMEngineDisplayName(NSString *engine) {
         item.image = [NSImage imageWithSystemSymbolName:@"trash" accessibilityDescription:@"Clean"];
         item.target = self;
         item.action = @selector(cleanAuxFilesAction:);
+    } else if ([itemIdentifier isEqualToString:@"Preferences"]) {
+        item.label = @"设置";
+        item.paletteLabel = @"偏好设置";
+        item.toolTip = @"打开偏好设置 (⌘,)";
+        item.image = [NSImage imageWithSystemSymbolName:@"gearshape" accessibilityDescription:@"Preferences"];
+        item.target = self;
+        item.action = @selector(showPreferencesToolbarAction:);
     } else if ([itemIdentifier isEqualToString:@"ZoomIn"]) {
         item.label = @"放大";
         item.image = [NSImage imageWithSystemSymbolName:@"plus.magnifyingglass" accessibilityDescription:@"Zoom In"];
@@ -2221,6 +2236,10 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 
 - (void)exportPDFToolbarAction:(id)sender {
     [self exportPDF];
+}
+
+- (void)showPreferencesToolbarAction:(id)sender {
+    [[TMPreferencesWindowController shared] showPreferences];
 }
 
 - (BOOL)validateToolbarItem:(NSToolbarItem *)item {

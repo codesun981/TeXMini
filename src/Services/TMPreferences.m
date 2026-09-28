@@ -6,6 +6,7 @@ static NSString *const kFontName = @"TMEditorFontName";
 static NSString *const kFontSize = @"TMEditorFontSize";
 static NSString *const kSoftWrap = @"TMSoftWrap";
 static NSString *const kCurrentLine = @"TMHighlightCurrentLine";
+static NSString *const kCombinedSidebar = @"TMCombinedSidebar";
 static NSString *const kAutoSave = @"TMAutoSave";
 static NSString *const kRestoreSession = @"TMRestoreLastSession";
 static NSString *const kEngine = @"TMEngine";
@@ -30,6 +31,7 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
         kFontSize: @13.5,
         kSoftWrap: @YES,
         kCurrentLine: @YES,
+        kCombinedSidebar: @NO,
         kAutoSave: @YES,
         kRestoreSession: @YES,
         kEngine: @0,
@@ -74,6 +76,9 @@ static NSString *const kPDFInverted = @"TMPDFInverted";
 
 - (BOOL)highlightsCurrentLine { return [self.defaults boolForKey:kCurrentLine]; }
 - (void)setHighlightsCurrentLine:(BOOL)v { [self.defaults setBool:v forKey:kCurrentLine]; [self didChange]; }
+
+- (BOOL)combinedSidebar { return [self.defaults boolForKey:kCombinedSidebar]; }
+- (void)setCombinedSidebar:(BOOL)v { [self.defaults setBool:v forKey:kCombinedSidebar]; [self didChange]; }
 
 - (BOOL)autoSaveEnabled { return [self.defaults boolForKey:kAutoSave]; }
 - (void)setAutoSaveEnabled:(BOOL)v { [self.defaults setBool:v forKey:kAutoSave]; [self didChange]; }

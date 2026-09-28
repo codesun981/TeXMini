@@ -87,6 +87,44 @@
 
 @end
 
+/// 同页模式中间的分割线，仅负责绘制；鼠标事件由父侧边栏统一处理。
+@interface TMCombinedSidebarDividerView : NSView
+@end
+
+@implementation TMCombinedSidebarDividerView
+
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds cursor:[NSCursor resizeUpDownCursor]];
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { return YES; }
+
+- (void)viewDidChangeEffectiveAppearance {
+    [super viewDidChangeEffectiveAppearance];
+    self.needsDisplay = YES;
+}
+
+- (void)setFrameSize:(NSSize)newSize {
+    [super setFrameSize:newSize];
+    self.needsDisplay = YES;
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [[NSColor controlBackgroundColor] setFill];
+    NSRectFill(self.bounds);
+
+    [[NSColor separatorColor] setFill];
+    NSRectFill(NSMakeRect(NSMinX(self.bounds), NSMinY(self.bounds), NSWidth(self.bounds), 1.0));
+    NSRectFill(NSMakeRect(NSMinX(self.bounds), NSMaxY(self.bounds) - 1.0, NSWidth(self.bounds), 1.0));
+
+    [[NSColor secondaryLabelColor] setFill];
+    NSRect grip = NSMakeRect(floor(NSMidX(self.bounds) - 8.0),
+                             floor(NSMidY(self.bounds) - 1.0), 16.0, 2.0);
+    [[NSBezierPath bezierPathWithRoundedRect:grip xRadius:1.0 yRadius:1.0] fill];
+}
+
+@end
+
 #pragma mark - TMOutlineSidebarView
 
 @interface TMOutlineSidebarView () <NSOutlineViewDelegate, NSOutlineViewDataSource>
@@ -99,7 +137,21 @@
 @property (nonatomic, strong) NSOutlineView *outlineView;
 @property (nonatomic, strong) NSView *emptyView;
 @property (nonatomic, strong, readwrite) TMFileBrowserView *fileBrowserView;
+@property (nonatomic, strong) NSTextField *combinedTitleLabel;
+@property (nonatomic, strong) TMCombinedSidebarDividerView *combinedDivider;
+@property (nonatomic, assign) CGFloat combinedSplitRatio;
+@property (nonatomic, strong) NSLayoutConstraint *outlineBottomConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *emptyBottomConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *fileTopConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *combinedOutlineBottomConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *combinedEmptyBottomConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *combinedFileTopConstraint;
+@property (nonatomic, strong) NSLayoutConstraint *combinedDividerTopConstraint;
+@property (nonatomic, strong) NSPanGestureRecognizer *combinedDividerPanGesture;
+@property (nonatomic, assign) CGFloat combinedPanGrabOffset;
 
+- (void)setCombinedDividerY:(CGFloat)y;
+- (void)rebuildCombinedConstraints;
 @property (nonatomic, copy, readwrite) NSArray<TMOutlineItem *> *rootItems;
 @property (nonatomic, copy, readwrite) NSArray<TMOutlineItem *> *flatItems;
 
@@ -112,11 +164,18 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
 
 @implementation TMOutlineSidebarView
 
+- (BOOL)isFlipped {
+    // 同页分隔条按距顶部的位置计算比例，手势和标题边界也使用向下递增的坐标。
+    return YES;
+}
+
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
     if (self) {
         _rootItems = @[];
         _flatItems = @[];
+        CGFloat savedSplit = [[NSUserDefaults standardUserDefaults] doubleForKey:@"TMCombinedSidebarSplitRatio"];
+        _combinedSplitRatio = (savedSplit >= 0.25 && savedSplit <= 0.75) ? savedSplit : 0.5;
         _isProgrammaticSelection = NO;
 
         [self setupMaterial];
@@ -160,6 +219,13 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
     _countBadgeLabel.translatesAutoresizingMaskIntoConstraints = NO;
     [_headerView addSubview:_countBadgeLabel];
 
+    _combinedTitleLabel = [NSTextField labelWithString:@"大纲 · 文件"];
+    _combinedTitleLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+    _combinedTitleLabel.textColor = [NSColor secondaryLabelColor];
+    _combinedTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _combinedTitleLabel.hidden = YES;
+    [_headerView addSubview:_combinedTitleLabel];
+
     _toggleButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"sidebar.left" accessibilityDescription:@"折叠大纲"]
                                        target:self
                                        action:@selector(toggleButtonClicked:)];
@@ -184,6 +250,9 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
         [_modeControl.leadingAnchor constraintEqualToAnchor:_headerView.leadingAnchor constant:10],
         [_modeControl.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
 
+        [_combinedTitleLabel.leadingAnchor constraintEqualToAnchor:_headerView.leadingAnchor constant:10],
+        [_combinedTitleLabel.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
+
         [_countBadgeLabel.leadingAnchor constraintEqualToAnchor:_modeControl.trailingAnchor constant:8],
         [_countBadgeLabel.centerYAnchor constraintEqualToAnchor:_headerView.centerYAnchor],
         [_countBadgeLabel.trailingAnchor constraintLessThanOrEqualToAnchor:_toggleButton.leadingAnchor constant:-4],
@@ -205,15 +274,98 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
     _fileBrowserView.translatesAutoresizingMaskIntoConstraints = NO;
     _fileBrowserView.hidden = YES;
     [self addSubview:_fileBrowserView];
+    self.fileTopConstraint = [_fileBrowserView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor];
     [NSLayoutConstraint activateConstraints:@[
-        [_fileBrowserView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
+        self.fileTopConstraint,
         [_fileBrowserView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [_fileBrowserView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
         [_fileBrowserView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor]
     ]];
+
+    _combinedDivider = [[TMCombinedSidebarDividerView alloc] init];
+    _combinedDivider.wantsLayer = YES;
+    _combinedDivider.translatesAutoresizingMaskIntoConstraints = NO;
+    _combinedDivider.toolTip = @"上下拖动，调整大纲和文件区域高度";
+    _combinedDivider.hidden = YES;
+    [self addSubview:_combinedDivider];
+    self.combinedDividerPanGesture = [[NSPanGestureRecognizer alloc] initWithTarget:self action:@selector(combinedDividerPanned:)];
+    [_combinedDivider addGestureRecognizer:self.combinedDividerPanGesture];
+    [NSLayoutConstraint activateConstraints:@[
+        [_combinedDivider.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
+        [_combinedDivider.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
+        [_combinedDivider.heightAnchor constraintEqualToConstant:8]
+    ]];
+    [self rebuildCombinedConstraints];
+}
+
+- (void)rebuildCombinedConstraints {
+    if (self.combinedDividerTopConstraint) {
+        [NSLayoutConstraint deactivateConstraints:@[self.combinedDividerTopConstraint]];
+    }
+    if (self.combinedMode && self.combinedOutlineBottomConstraint) {
+        [NSLayoutConstraint deactivateConstraints:@[self.combinedOutlineBottomConstraint,
+                                                    self.combinedEmptyBottomConstraint,
+                                                    self.combinedFileTopConstraint]];
+    }
+
+    CGFloat ratio = MIN(MAX(self.combinedSplitRatio, 0.25), 0.75);
+    self.combinedSplitRatio = ratio;
+    self.combinedDividerTopConstraint = [NSLayoutConstraint constraintWithItem:_combinedDivider
+                                                                       attribute:NSLayoutAttributeCenterY
+                                                                       relatedBy:NSLayoutRelationEqual
+                                                                          toItem:self
+                                                                       attribute:NSLayoutAttributeBottom
+                                                                      multiplier:ratio
+                                                                        constant:0];
+    // 分隔栏独占空间，避免覆盖大纲最后一行和文件区域的标题。
+    self.combinedOutlineBottomConstraint = [_scrollView.bottomAnchor constraintEqualToAnchor:_combinedDivider.topAnchor];
+    self.combinedEmptyBottomConstraint = [_emptyView.bottomAnchor constraintEqualToAnchor:_combinedDivider.topAnchor];
+    self.combinedFileTopConstraint = [_fileBrowserView.topAnchor constraintEqualToAnchor:_combinedDivider.bottomAnchor];
+    [NSLayoutConstraint activateConstraints:@[self.combinedDividerTopConstraint]];
+    if (self.combinedMode) {
+        [NSLayoutConstraint activateConstraints:@[self.combinedOutlineBottomConstraint,
+                                                   self.combinedEmptyBottomConstraint,
+                                                   self.combinedFileTopConstraint]];
+    }
+}
+
+- (void)combinedDividerPanned:(NSPanGestureRecognizer *)gesture {
+    if (!self.combinedMode) return;
+    NSPoint point = [gesture locationInView:self];
+    if (gesture.state == NSGestureRecognizerStateBegan) {
+        self.combinedPanGrabOffset = point.y - (NSHeight(self.bounds) * self.combinedSplitRatio);
+    } else if (gesture.state == NSGestureRecognizerStateChanged) {
+        [self setCombinedDividerY:point.y - self.combinedPanGrabOffset];
+    }
+}
+
+- (void)setCombinedDividerY:(CGFloat)y {
+    if (!self.combinedMode) return;
+    CGFloat height = NSHeight(self.bounds);
+    if (height <= 0) return;
+
+    CGFloat halfDividerHeight = NSHeight(self.combinedDivider.frame) / 2.0;
+    CGFloat minY = NSMaxY(self.headerView.frame) + 90.0 + halfDividerHeight;
+    CGFloat maxY = height - 90.0 - halfDividerHeight;
+    if (maxY <= minY) return;
+    CGFloat clampedY = MIN(MAX(y, minY), maxY);
+    CGFloat ratio = MIN(MAX(clampedY / height, 0.25), 0.75);
+    if (fabs(ratio - self.combinedSplitRatio) < 0.002) return;
+
+    self.combinedSplitRatio = ratio;
+    [[NSUserDefaults standardUserDefaults] setDouble:ratio forKey:@"TMCombinedSidebarSplitRatio"];
+    [self rebuildCombinedConstraints];
+    [self layoutSubtreeIfNeeded];
+    [self.window invalidateCursorRectsForView:self.combinedDivider];
 }
 
 #pragma mark - 模式切换
+
+- (void)setCombinedMode:(BOOL)combinedMode {
+    if (_combinedMode == combinedMode) return;
+    _combinedMode = combinedMode;
+    [self applyModeVisibility];
+}
 
 - (void)setMode:(TMSidebarMode)mode {
     if (_mode == mode) return;
@@ -228,9 +380,33 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
 }
 
 - (void)applyModeVisibility {
+    BOOL combined = self.combinedMode;
     BOOL files = (self.mode == TMSidebarModeFiles);
+
+    self.modeControl.hidden = combined;
+    self.combinedTitleLabel.hidden = !combined;
+    self.countBadgeLabel.hidden = combined || files;
+    self.combinedDivider.hidden = !combined;
+
+    if (combined) {
+        [NSLayoutConstraint deactivateConstraints:@[self.outlineBottomConstraint, self.emptyBottomConstraint, self.fileTopConstraint]];
+        [NSLayoutConstraint activateConstraints:@[self.combinedOutlineBottomConstraint,
+                                                   self.combinedEmptyBottomConstraint,
+                                                   self.combinedFileTopConstraint]];
+
+        self.fileBrowserView.hidden = NO;
+        BOOL empty = self.rootItems.count == 0;
+        self.scrollView.hidden = empty;
+        self.emptyView.hidden = !empty;
+        return;
+    }
+
+    [NSLayoutConstraint deactivateConstraints:@[self.combinedOutlineBottomConstraint,
+                                                self.combinedEmptyBottomConstraint,
+                                                self.combinedFileTopConstraint]];
+    [NSLayoutConstraint activateConstraints:@[self.outlineBottomConstraint, self.emptyBottomConstraint, self.fileTopConstraint]];
+
     self.fileBrowserView.hidden = !files;
-    self.countBadgeLabel.hidden = files;
     if (files) {
         self.scrollView.hidden = YES;
         self.emptyView.hidden = YES;
@@ -269,11 +445,13 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
 
     _scrollView.documentView = _outlineView;
 
+    NSLayoutConstraint *outlineTop = [_scrollView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor];
+    self.outlineBottomConstraint = [_scrollView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor];
     [NSLayoutConstraint activateConstraints:@[
-        [_scrollView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
+        outlineTop,
         [_scrollView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [_scrollView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [_scrollView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor]
+        self.outlineBottomConstraint
     ]];
 }
 
@@ -302,11 +480,12 @@ static NSString *const kTMDefaultsSidebarMode = @"TMSidebarMode";
     emptyDesc.translatesAutoresizingMaskIntoConstraints = NO;
     [_emptyView addSubview:emptyDesc];
 
+    self.emptyBottomConstraint = [_emptyView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor];
     [NSLayoutConstraint activateConstraints:@[
         [_emptyView.topAnchor constraintEqualToAnchor:_headerView.bottomAnchor],
         [_emptyView.leadingAnchor constraintEqualToAnchor:self.leadingAnchor],
         [_emptyView.trailingAnchor constraintEqualToAnchor:self.trailingAnchor],
-        [_emptyView.bottomAnchor constraintEqualToAnchor:self.bottomAnchor],
+        self.emptyBottomConstraint,
 
         [emptyIcon.centerXAnchor constraintEqualToAnchor:_emptyView.centerXAnchor],
         [emptyIcon.centerYAnchor constraintEqualToAnchor:_emptyView.centerYAnchor constant:-30],

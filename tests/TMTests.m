@@ -292,6 +292,17 @@ TM_TEST(test_preferences_autosave_and_restore_default_on) {
     [d removeObjectForKey:@"TMAutoSave"];
 }
 
+TM_TEST(test_combined_sidebar_preference_defaults_off_and_persists) {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    [d removeObjectForKey:@"TMCombinedSidebar"];
+    [TMPreferences registerDefaults];
+    TM_ASSERT_TRUE(![TMPreferences shared].combinedSidebar);
+    [TMPreferences shared].combinedSidebar = YES;
+    TM_ASSERT_TRUE([d boolForKey:@"TMCombinedSidebar"]);
+    TM_ASSERT_TRUE([TMPreferences shared].combinedSidebar);
+    [d removeObjectForKey:@"TMCombinedSidebar"];
+}
+
 TM_TEST(test_session_round_trip_and_missing_paths) {
     NSString *dir = [NSTemporaryDirectory() stringByAppendingPathComponent:[NSUUID UUID].UUIDString];
     [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];

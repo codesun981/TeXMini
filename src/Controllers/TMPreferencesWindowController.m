@@ -8,6 +8,7 @@
 @property (nonatomic, strong) NSStepper *fontSizeStepper;
 @property (nonatomic, strong) NSButton *softWrapCheck;
 @property (nonatomic, strong) NSButton *currentLineCheck;
+@property (nonatomic, strong) NSButton *combinedSidebarCheck;
 @property (nonatomic, strong) NSButton *autoSaveCheck;
 @property (nonatomic, strong) NSButton *restoreSessionCheck;
 @property (nonatomic, strong) NSPopUpButton *enginePopup;
@@ -28,7 +29,7 @@
 }
 
 - (instancetype)init {
-    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 480, 360)
+    NSWindow *window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 500, 540)
                                                    styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
                                                      backing:NSBackingStoreBuffered
                                                        defer:NO];
@@ -121,6 +122,7 @@
 
     _softWrapCheck = [NSButton checkboxWithTitle:@"自动换行" target:self action:@selector(toggleChanged:)];
     _currentLineCheck = [NSButton checkboxWithTitle:@"高亮当前行" target:self action:@selector(toggleChanged:)];
+    _combinedSidebarCheck = [NSButton checkboxWithTitle:@"文件和大纲同时显示" target:self action:@selector(toggleChanged:)];
     _autoSaveCheck = [NSButton checkboxWithTitle:@"自动保存（停止输入 1 秒后保存 .tex，不编译）" target:self action:@selector(toggleChanged:)];
     _restoreSessionCheck = [NSButton checkboxWithTitle:@"启动时打开上次的项目（关闭则显示首页）" target:self action:@selector(toggleChanged:)];
 
@@ -145,6 +147,7 @@
         @[[self label:@"字体："], fontRow],
         @[[NSGridCell emptyContentView], _softWrapCheck],
         @[[NSGridCell emptyContentView], _currentLineCheck],
+        @[[NSGridCell emptyContentView], _combinedSidebarCheck],
         @[[NSGridCell emptyContentView], _autoSaveCheck],
         @[[NSGridCell emptyContentView], _restoreSessionCheck],
         @[[self sectionLabel:@"编译"], [NSGridCell emptyContentView]],
@@ -161,13 +164,13 @@
     grid.rowAlignment = NSGridRowAlignmentFirstBaseline;
     [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
     [grid columnAtIndex:0].width = 90;
-    [grid columnAtIndex:1].width = 340;
+    [grid columnAtIndex:1].width = 360;
     // 分节标题跨两列
     [grid mergeCellsInHorizontalRange:NSMakeRange(0, 2) verticalRange:NSMakeRange(0, 1)];
-    [grid mergeCellsInHorizontalRange:NSMakeRange(0, 2) verticalRange:NSMakeRange(6, 1)];
+    [grid mergeCellsInHorizontalRange:NSMakeRange(0, 2) verticalRange:NSMakeRange(7, 1)];
     [grid cellAtColumnIndex:0 rowIndex:0].xPlacement = NSGridCellPlacementLeading;
-    [grid cellAtColumnIndex:0 rowIndex:6].xPlacement = NSGridCellPlacementLeading;
-    [grid rowAtIndex:6].topPadding = 8;
+    [grid cellAtColumnIndex:0 rowIndex:7].xPlacement = NSGridCellPlacementLeading;
+    [grid rowAtIndex:7].topPadding = 8;
 
     grid.translatesAutoresizingMaskIntoConstraints = NO;
     [content addSubview:grid];
@@ -175,7 +178,7 @@
         [grid.topAnchor constraintEqualToAnchor:content.topAnchor constant:20],
         [grid.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20],
         [grid.trailingAnchor constraintLessThanOrEqualToAnchor:content.trailingAnchor constant:-20],
-        [grid.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-20]
+        [grid.bottomAnchor constraintLessThanOrEqualToAnchor:content.bottomAnchor constant:-20]
     ]];
 }
 
@@ -198,6 +201,7 @@
     _fontSizeStepper.doubleValue = p.editorFontSize;
     _softWrapCheck.state = p.softWrapEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _currentLineCheck.state = p.highlightsCurrentLine ? NSControlStateValueOn : NSControlStateValueOff;
+    _combinedSidebarCheck.state = p.combinedSidebar ? NSControlStateValueOn : NSControlStateValueOff;
     _autoSaveCheck.state = p.autoSaveEnabled ? NSControlStateValueOn : NSControlStateValueOff;
     _restoreSessionCheck.state = p.restoreLastSession ? NSControlStateValueOn : NSControlStateValueOff;
     NSInteger engine = p.defaultEngine;
@@ -240,6 +244,7 @@
     TMPreferences *p = [TMPreferences shared];
     if (sender == _softWrapCheck) p.softWrapEnabled = on;
     else if (sender == _currentLineCheck) p.highlightsCurrentLine = on;
+    else if (sender == _combinedSidebarCheck) p.combinedSidebar = on;
     else if (sender == _autoSaveCheck) p.autoSaveEnabled = on;
     else if (sender == _restoreSessionCheck) p.restoreLastSession = on;
     else if (sender == _autoCompileCheck) p.autoCompileEnabled = on;

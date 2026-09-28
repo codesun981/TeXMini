@@ -25,6 +25,8 @@ typedef NS_ENUM(NSInteger, TMSidebarMode) {
 @property (nonatomic, readonly) NSArray<TMOutlineItem *> *flatItems;
 /// 文件页；控制器负责设置其 delegate 与根目录。
 @property (nonatomic, strong, readonly) TMFileBrowserView *fileBrowserView;
+/// YES 时上下同时显示大纲和文件，NO 时保留顶部单页切换。
+@property (nonatomic, assign) BOOL combinedMode;
 /// 当前显示的页，持久化到 NSUserDefaults。
 @property (nonatomic, assign) TMSidebarMode mode;
 
