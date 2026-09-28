@@ -12,6 +12,7 @@ clang -fobjc-arc -O0 -g -Wno-gnu-zero-variadic-macro-arguments \
     src/Models/TMDocument.m \
     src/Models/TMOutlineItem.m \
     src/Services/TMLineIndex.m \
+    src/Services/TMWordCounter.m \
     src/Services/TMOutlineParser.m \
     src/Services/TMLaTeXScanner.m \
     src/Services/TMMarkdownScanner.m \

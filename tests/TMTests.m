@@ -1124,6 +1124,7 @@ TM_TEST(test_format_usepackage_location) {
 #include "TMLineIndexTests.inc"
 #include "TMCompletionCacheTests.inc"
 #include "TMOutlineReuseTests.inc"
+#include "TMWordCounterTests.inc"
 
 int main(void) {
     @autoreleasepool {

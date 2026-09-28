@@ -5,6 +5,7 @@
 #import "TMStatusBarView.h"
 #import "TMLogDrawerView.h"
 #import "TMCompiler.h"
+#import "TMWordCounter.h"
 #import "TMSyncTeX.h"
 #import "TMOutlineSidebarView.h"
 #import "TMOutlineParser.h"
@@ -92,8 +93,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong, nullable) NSTimer *outlineDebounceTimer;
 @property (nonatomic, strong, nullable) NSTimer *autoCompileTimer;
 @property (nonatomic, strong, nullable) NSTimer *autoSaveTimer;
-/// 后台字数统计的代次：只有最新一次的结果写回状态栏。
-@property (nonatomic, assign) NSUInteger wordCountGeneration;
+@property (nonatomic, strong) TMWordCounter *wordCounter;
 /// 本次编译是“检测到旧辅助文件 → 自动清理”后的重试：再失败就不再清理，照常报错。
 @property (nonatomic, assign) BOOL isRetryingAfterAutoClean;
 /// 自动清理后重编仍失败的“主文件|辅助文件”：清理对它们没用，本次会话不再自动清理。
@@ -147,6 +147,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
         _currentCursorLine = 1;
         _currentCursorCol = 1;
         _unhelpfulAutoCleans = [NSMutableSet set];
+        _wordCounter = [[TMWordCounter alloc] init];
         _autoCompileEnabled = [TMPreferences shared].autoCompileEnabled;
         window.delegate = self;
 
@@ -687,6 +688,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 #pragma mark - 文档管理与加载
 
 - (void)loadDocumentIntoEditor {
+    [self.wordCounter cancel];
     if (self.documentModel) {
         self.editorTextView.completionDocumentKey = self.documentModel.isScratch ? nil : self.documentModel.fileURL.URLByStandardizingPath.path;
         // 先确定新文档语法，只失效扫描缓存，不用新语法重画即将被替换的旧正文。
@@ -1123,6 +1125,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    [self.wordCounter cancel];
     [self saveSessionState];
     // 计时器强引用 self：关窗时停掉，否则窗口关了还会触发编译 / 保存，控制器也释放不掉。
     // 不补做待执行的自动保存：用户可能刚在关闭确认里选了“不保存”。
@@ -1517,6 +1520,8 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 #pragma mark - TMEditorTextViewDelegate & NSTextDelegate
 
 - (void)textDidChange:(NSNotification *)notification {
+    // 立即停止旧文本统计；新快照仍沿用大纲的 250 ms 防抖。
+    [self.wordCounter cancel];
     if (!self.documentModel.isDirty) {
         self.documentModel.isDirty = YES;
         self.window.documentEdited = YES;
@@ -1535,21 +1540,10 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 }
 
 - (void)updateWordCount {
-    // 按词枚举对长文（尤其中文分词）不便宜：拷一份快照到后台数，只采用最新一次的结果
-    NSString *text = [self.editorTextView.string copy];
-    NSUInteger generation = ++self.wordCountGeneration;
     __weak typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        __block NSUInteger words = 0;
-        [text enumerateSubstringsInRange:NSMakeRange(0, text.length)
-                                 options:NSStringEnumerationByWords | NSStringEnumerationSubstringNotRequired
-                              usingBlock:^(NSString *substring, NSRange substringRange, NSRange enclosingRange, BOOL *stop) {
-            words++;
-        }];
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (weakSelf.wordCountGeneration == generation) [weakSelf.statusBar setWordCount:words];
-        });
-    });
+    [self.wordCounter countText:self.editorTextView.string completion:^(NSUInteger words) {
+        [weakSelf.statusBar setWordCount:words];
+    }];
 }
 
 #pragma mark - 拖入图片 / 文件
@@ -1830,6 +1824,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     [self showPDFIfExistsAtURL:nil];
     [self.statusBar showReadyState];
     [self showWelcome];
+    [self.wordCounter cancel];
 }
 
 #pragma mark - TMWelcomeViewDelegate
