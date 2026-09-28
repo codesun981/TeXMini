@@ -12,7 +12,8 @@ echo "==> 正在编译 ${APP_NAME}..."
 
 mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${OBJ_DIR}"
 
-CFLAGS=(-fobjc-arc -O2 -Ivendor/synctex -Isrc -Isrc/Models -Isrc/Services -Isrc/Views -Isrc/Controllers)
+CFLAGS=(-fobjc-arc -mmacosx-version-min=14.0 -O2 -Ivendor/synctex -Isrc -Isrc/Models -Isrc/Services -Isrc/Views -Isrc/Controllers)
+LDFLAGS=(-fobjc-arc -mmacosx-version-min=14.0)
 FRAMEWORKS=(-framework Cocoa -framework PDFKit -framework QuartzCore -framework CoreText
             -framework CoreImage -framework UniformTypeIdentifiers -lz)
 
@@ -20,9 +21,22 @@ FRAMEWORKS=(-framework Cocoa -framework PDFKit -framework QuartzCore -framework 
 SOURCES=(vendor/synctex/synctex_parser.c vendor/synctex/synctex_parser_utils.c)
 while IFS= read -r f; do SOURCES+=("$f"); done < <(find src -name '*.m' | sort)
 
+# 编译参数、工具链或源文件清单变化时重建，避免旧 .o 保留错误的最低系统版本。
+SETTINGS="${OBJ_DIR}/.build-settings"
+CURRENT_SETTINGS="${SETTINGS}.current"
+{
+    printf '%s\n' "${CFLAGS[@]}" "${LDFLAGS[@]}" "${FRAMEWORKS[@]}" "${SOURCES[@]}"
+    clang --version
+    xcrun --show-sdk-path
+    uname -m
+} > "$CURRENT_SETTINGS"
+SETTINGS_CHANGED=0
+if ! cmp -s "$SETTINGS" "$CURRENT_SETTINGS"; then SETTINGS_CHANGED=1; fi
+
 # 增量编译：.o 不存在、比源文件旧、或比它依赖的任一头文件旧（clang -MMD 生成的 .d）时才重编
 needs_build() {
     local src="$1" obj="$2" dep="${2%.o}.d"
+    [ "$SETTINGS_CHANGED" = 1 ] && return 0
     [ -f "$obj" ] && [ -f "$dep" ] || return 0
     [ "$src" -nt "$obj" ] && return 0
     for h in $(sed -e 's/\\$//' -e 's/^[^:]*://' "$dep"); do
@@ -50,11 +64,13 @@ fi
 
 # 链接：有 .o 变化或可执行文件不存在时
 BINARY="${MACOS_DIR}/${APP_NAME}"
-if [ ${#STALE[@]} -gt 0 ] || [ ! -f "$BINARY" ]; then
-    clang -fobjc-arc "${FRAMEWORKS[@]}" "${OBJECTS[@]}" -o "$BINARY"
+if [ ${#STALE[@]} -gt 0 ] || [ "$SETTINGS_CHANGED" = 1 ] || [ ! -f "$BINARY" ]; then
+    clang "${LDFLAGS[@]}" "${FRAMEWORKS[@]}" "${OBJECTS[@]}" -o "$BINARY"
 fi
+mv "$CURRENT_SETTINGS" "$SETTINGS"
 
 cp resources/Info.plist "${CONTENTS_DIR}/Info.plist"
+cp LICENSE THIRD_PARTY_NOTICES.md "${RESOURCES_DIR}/"
 
 # 复制一份图标（如有）
 if [ -f "resources/${APP_NAME}.icns" ]; then
