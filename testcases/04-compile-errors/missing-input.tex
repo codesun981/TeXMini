@@ -1,9 +1,0 @@
-\documentclass{article}
-\begin{document}
-Line 3. The next line inputs a file that does not exist:
-\input{chapters/nothing-here}
-
-Expected: error "File `chapters/nothing-here.tex' not found" pointing at line 4.
-With -halt-on-error latexmk stops immediately; the log drawer must open by
-itself and the raw-log tab must contain the raw TeX output.
-\end{document}

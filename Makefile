@@ -35,7 +35,7 @@ test:
 	@./tests/run_tests.sh
 
 clean:
-	@rm -rf build sample/*.aux sample/*.log sample/*.synctex.gz sample/*.fls sample/*.fdb_latexmk sample/*.pdf
+	@rm -rf build
 	@echo "==> 清理完成。"
 
 .PHONY: all build run dev install test clean

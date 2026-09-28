@@ -1,9 +1,0 @@
-% !TEX root = main.tex
-\section{Part file}
-This file has no \verb|\documentclass|. Compiling it on its own would fail;
-thanks to the root magic comment TeXMini compiles \texttt{main.tex} instead and
-shows \texttt{main.pdf}. Double-click this line: the PDF must jump to it, and
-double-clicking the PDF must land back in \texttt{part.tex}.
-
-Also try: delete line 1, save, Cmd-B. Inference should \emph{still} find main.tex
-because main.tex \verb|\input|s this file. Put line 1 back afterwards.

@@ -12,6 +12,11 @@ build/
 # References
 references/
 
+# 本地开发资料与手工测试样例，不发布到公开仓库
+/docs/
+/testcases/
+/sample/
+
 # LaTeX auxiliary files
 *.aux
 *.log

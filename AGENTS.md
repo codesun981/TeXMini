@@ -39,8 +39,6 @@ src/Services/       无 UI 依赖的纯逻辑：编译、SyncTeX、日志解析�
 src/Views/          编辑器、高亮、行号、PDF 视图、大纲/文件侧栏、日志抽屉、状态栏
 vendor/synctex/     synctex_parser (C)
 tests/              TMTests.m（单元）、TMCompileIntegration.m（需要 latexmk）、run_tests.sh
-sample/             示例 .tex
-docs/superpowers/   历史实现计划
 ```
 
 ## 开发约定

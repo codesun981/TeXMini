@@ -1,9 +1,0 @@
-\documentclass[tikz,border=4pt]{standalone}
-\begin{document}
-\begin{tikzpicture}
-  \draw[thick,->] (0,0) -- (4,0) node[right] {$x$};
-  \draw[thick,->] (0,0) -- (0,3) node[above] {$y$};
-  \draw[blue,thick,domain=0:3.8,smooth] plot (\x,{0.2*\x*\x});
-  \node[red] at (2,2.5) {external-diagram.pdf};
-\end{tikzpicture}
-\end{document}
