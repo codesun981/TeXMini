@@ -1,0 +1,112 @@
+name: Publish release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Validate version and architecture
+        id: version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' resources/Info.plist)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$RELEASE_TAG" = "v$version"
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build, package and verify
+        run: bash scripts/package_release.sh
+
+      - name: Upload installation packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: TeXMini-${{ matrix.arch }}
+          path: |
+            build/releases/TeXMini-${{ steps.version.outputs.version }}-macOS-${{ matrix.arch }}.dmg
+            build/releases/TeXMini-${{ steps.version.outputs.version }}-macOS-${{ matrix.arch }}.zip
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish GitHub release
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: TeXMini-*
+          path: build/releases
+          merge-multiple: true
+
+      - name: Verify package set and generate checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          cd build/releases
+          packages=(
+            "TeXMini-$version-macOS-arm64.dmg"
+            "TeXMini-$version-macOS-arm64.zip"
+            "TeXMini-$version-macOS-x86_64.dmg"
+            "TeXMini-$version-macOS-x86_64.zip"
+          )
+          for package in "${packages[@]}"; do test -s "$package"; done
+          sha256sum "${packages[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+
+      - name: Publish versioned packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --title "TeXMini $RELEASE_TAG" \
+            --notes-file .github/RELEASE_NOTES.md \
+            "build/releases/TeXMini-$version-macOS-arm64.dmg" \
+            "build/releases/TeXMini-$version-macOS-arm64.zip" \
+            "build/releases/TeXMini-$version-macOS-x86_64.dmg" \
+            "build/releases/TeXMini-$version-macOS-x86_64.zip" \
+            build/releases/SHA256SUMS.txt

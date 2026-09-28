@@ -34,8 +34,11 @@ test:
 	@chmod +x tests/run_tests.sh
 	@./tests/run_tests.sh
 
+package:
+	@bash scripts/package_release.sh
+
 clean:
 	@rm -rf build
 	@echo "==> 清理完成。"
 
-.PHONY: all build run dev install test clean
+.PHONY: all build run dev install test package clean
