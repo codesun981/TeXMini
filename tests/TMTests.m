@@ -857,12 +857,12 @@ TM_TEST(test_clean_removes_glossary_and_chapter_aux) {
     TM_ASSERT_TRUE([fm fileExistsAtPath:[dir URLByAppendingPathComponent:@"main.bbl"].path]);   // 要求保留 .bbl
     [TMDocument cleanAuxiliaryFilesForTeXFileURL:main];
 
-    for (NSString *gone in @[@"main.aux", @"main.glo", @"main.gls", @"main.acn", @"main.ist", @"main.lol", @"main.ent", @"main.xyc", @"main.bbl",
+    for (NSString *gone in @[@"main.aux", @"main.glo", @"main.gls", @"main.acn", @"main.lol", @"main.ent", @"main.xyc", @"main.bbl",
                              @"chapters/intro.aux"]) {
         TM_ASSERT_TRUE(![fm fileExistsAtPath:[dir URLByAppendingPathComponent:gone].path]);
     }
     // 源文件、参考文献库、插图保留；主 .aux 没列出的章节 .aux、同目录下别的项目的 .aux 也不动
-    for (NSString *kept in @[@"main.tex", @"chapters/intro.tex", @"chapters/notes.aux", @"other-project/paper.aux", @"refs.bib", @"figure.pdf"]) {
+    for (NSString *kept in @[@"main.tex", @"main.ist", @"chapters/intro.tex", @"chapters/notes.aux", @"other-project/paper.aux", @"refs.bib", @"figure.pdf"]) {
         TM_ASSERT_TRUE([fm fileExistsAtPath:[dir URLByAppendingPathComponent:kept].path]);
     }
     [fm removeItemAtURL:dir error:nil];
@@ -1129,6 +1129,7 @@ TM_TEST(test_format_usepackage_location) {
 #include "TMCompileTargetResolverTests.inc"
 #include "TMEngineCacheTests.inc"
 #include "TMCompilerLifecycleTests.inc"
+#include "TMDocumentSafetyTests.inc"
 #include "TMEditorRegressionTests.inc"
 
 int main(void) {
