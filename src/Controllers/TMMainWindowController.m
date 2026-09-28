@@ -696,6 +696,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)loadDocumentIntoEditorPreservingCompilation:(BOOL)preserveCompilation {
+    [_fontFix cancelPendingRequests];
     if (!preserveCompilation) [self resetCompilationState];
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];
@@ -825,6 +826,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 /// 用磁盘内容替换编辑器文本，尽量保住光标与滚动位置。
 - (void)reloadDocumentFromDiskWithContent:(NSString *)content modificationDate:(NSDate *)date {
+    [_fontFix cancelPendingRequests];
     NSRange sel = self.editorTextView.selectedRange;
     NSRect visible = self.editorScrollView.contentView.bounds;
 
@@ -1172,6 +1174,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 /// 切换文档或项目时同时丢弃显示状态和旧任务，避免异步尾包把日志重新写回来。
 - (void)resetCompilationState {
+    [_fontFix cancelPendingRequests];
     self.compilationContextGeneration++;
     [self.autoCompileTimer invalidate];
     self.autoCompileTimer = nil;
@@ -1191,6 +1194,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     // 任何一次新编译都不是“自动清理后的重试”（重试会在调用本方法之后再把标记设上）
     self.isRetryingAfterAutoClean = NO;
     if ([self isShowingWelcome]) return;
+    [_fontFix cancelPendingRequests];
     self.compilationContextGeneration++;
     self.documentModel.content = self.editorTextView.string;
 
@@ -1555,6 +1559,8 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 #pragma mark - TMEditorTextViewDelegate & NSTextDelegate
 
 - (void)textDidChange:(NSNotification *)notification {
+    // 字体建议使用正文快照；继续编辑后不再展示或应用旧建议。
+    [_fontFix cancelPendingRequests];
     // 立即停止旧文本统计；新快照仍沿用大纲的 250 ms 防抖。
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];

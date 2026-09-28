@@ -24,6 +24,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)showDocumentFontsSheet;
 /// 编译失败后调用：日志里有缺失字体时提示替换。
 - (void)offerFontFixForLog:(NSString *)log;
+/// 文档/项目切换或重新编译时，废弃旧请求并收起本控制器的面板；不触发字体目录加载。
+- (void)cancelPendingRequests;
 
 @end
 

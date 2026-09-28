@@ -10,7 +10,8 @@
 @property (nonatomic, weak) id<TMFontFixHost> host;
 /// 用户拒绝过替换的缺失字体：本次会话不再为它们弹窗（自动编译时不反复打扰）。
 @property (nonatomic, strong) NSMutableSet<NSString *> *declinedFontFixes;
-@property (nonatomic, assign) BOOL isShowingFontFixAlert;
+@property (nonatomic, assign) NSUInteger requestGeneration;
+@property (nonatomic, strong, nullable) NSWindow *activeSheet;
 @end
 
 @implementation TMFontFixController
@@ -19,6 +20,25 @@
     self = [super init];
     if (self) _host = host;
     return self;
+}
+
+- (void)cancelPendingRequests {
+    self.requestGeneration++;
+    NSWindow *sheet = self.activeSheet;
+    self.activeSheet = nil;
+    if (sheet.sheetParent) [sheet.sheetParent endSheet:sheet returnCode:NSModalResponseCancel];
+}
+
+/// 只管理本控制器创建的 sheet，过期确认不能修改当前编辑器或旧项目文件。
+- (void)beginAlert:(NSAlert *)alert generation:(NSUInteger)generation completionHandler:(void (^)(NSModalResponse))completion {
+    if (generation != self.requestGeneration || !self.host.window) return;
+    NSWindow *sheet = alert.window;
+    self.activeSheet = sheet;
+    [alert beginSheetModalForWindow:self.host.window completionHandler:^(NSModalResponse response) {
+        if (self.activeSheet == sheet) self.activeSheet = nil;
+        if (generation != self.requestGeneration) return;
+        completion(response);
+    }];
 }
 
 #pragma mark - 读写辅助
@@ -54,6 +74,8 @@
 
 /// 编辑 › 文档字体…：字体设置写在主文件的导言区；当前文件不是主文件时先问要不要打开主文件。
 - (void)showDocumentFontsSheet {
+    [self cancelPendingRequests];
+    NSUInteger generation = self.requestGeneration;
     if (![TMFontSettings contentHasPreamble:self.host.editorTextView.string]) {
         NSURL *main = [self.host mainFileURLForCompile];
         if (!main || [self isCurrentDocumentURL:main]) {
@@ -65,22 +87,27 @@
         alert.informativeText = [NSString stringWithFormat:@"当前文件没有 \\documentclass。要打开主文件 %@ 吗？", main.lastPathComponent];
         [alert addButtonWithTitle:@"打开主文件"];
         [alert addButtonWithTitle:@"取消"];
-        [alert beginSheetModalForWindow:self.host.window completionHandler:^(NSModalResponse response) {
+        [self beginAlert:alert generation:generation completionHandler:^(NSModalResponse response) {
             if (response != NSAlertFirstButtonReturn) return;
             [self.host openDocumentAtURL:main];
             // 用户可能在“保存更改？”里取消了切换
             if ([self isCurrentDocumentURL:main] && [TMFontSettings contentHasPreamble:self.host.editorTextView.string]) {
-                dispatch_async(dispatch_get_main_queue(), ^{ [self showDocumentFontsSheet]; });
+                // 合法打开主文件也会取消旧请求；从切换完成后的 generation 继续。
+                NSUInteger nextGeneration = self.requestGeneration;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (nextGeneration == self.requestGeneration && [self isCurrentDocumentURL:main]) [self showDocumentFontsSheet];
+                });
             }
         }];
         return;
     }
     [[TMFontCatalog shared] loadWithCompletion:^(NSArray<TMFontFamily *> *families) {
-        [self presentDocumentFontsSheetWithFamilies:families];
+        if (generation != self.requestGeneration) return;
+        [self presentDocumentFontsSheetWithFamilies:families generation:generation];
     }];
 }
 
-- (void)presentDocumentFontsSheetWithFamilies:(NSArray<TMFontFamily *> *)families {
+- (void)presentDocumentFontsSheetWithFamilies:(NSArray<TMFontFamily *> *)families generation:(NSUInteger)generation {
     NSString *content = self.host.editorTextView.string;
     NSString *cls = [TMFontSettings documentClassInContent:content] ?: @"";
     BOOL ctex = [TMFontSettings isCTeXContent:content];
@@ -97,7 +124,7 @@
     alert.accessoryView = fontView;
     alert.window.initialFirstResponder = fontView.latinPopup;
 
-    [alert beginSheetModalForWindow:self.host.window completionHandler:^(NSModalResponse response) {
+    [self beginAlert:alert generation:generation completionHandler:^(NSModalResponse response) {
         if (response != NSAlertFirstButtonReturn) return;
         TMDocumentFontSettings *settings = fontView.selectedSettings;
         NSString *latest = self.host.editorTextView.string;
@@ -123,9 +150,11 @@
 /// 编译失败且日志里有“找不到字体”时调用：ctex fontset 引起的建议删掉 fontset，其余按替换表找本机可用的字体。
 - (void)offerFontFixForLog:(NSString *)log {
     NSArray<NSString *> *missing = [TMFontSettings missingFontNamesInLog:log];
-    if (missing.count == 0 || self.isShowingFontFixAlert) return;
+    if (missing.count == 0 || self.activeSheet) return;
     if (!self.declinedFontFixes) self.declinedFontFixes = [NSMutableSet set];
     if ([[NSSet setWithArray:missing] isSubsetOfSet:self.declinedFontFixes]) return;
+    [self cancelPendingRequests];
+    NSUInteger generation = self.requestGeneration;
 
     NSString *fontset = [TMFontSettings failingCTeXFontsetInLog:log];
     if (fontset) {
@@ -133,11 +162,13 @@
         return;
     }
     [[TMFontCatalog shared] loadWithCompletion:^(NSArray<TMFontFamily *> *families) {
-        [self offerReplacingMissingFonts:missing];
+        if (generation != self.requestGeneration) return;
+        [self offerReplacingMissingFonts:missing generation:generation];
     }];
 }
 
 - (void)offerRemovingCTeXFontset:(NSString *)fontset missingFonts:(NSArray<NSString *> *)missing {
+    NSUInteger generation = self.requestGeneration;
     NSURL *main = [self.host mainFileURLForCompile];
     NSString *content = [self latestContentOfFileURL:main] ?: @"";
     NSString *fixed = [TMFontSettings contentByRemovingCTeXFontset:fontset inContent:content];
@@ -152,9 +183,7 @@
     [alert addButtonWithTitle:@"删除选项并重新编译"];
     [alert addButtonWithTitle:@"取消"];
     alert.buttons[1].keyEquivalent = @"\e";
-    self.isShowingFontFixAlert = YES;
-    [alert beginSheetModalForWindow:self.host.window completionHandler:^(NSModalResponse response) {
-        self.isShowingFontFixAlert = NO;
+    [self beginAlert:alert generation:generation completionHandler:^(NSModalResponse response) {
         if (response != NSAlertFirstButtonReturn) {
             [self.declinedFontFixes addObjectsFromArray:missing];
             return;
@@ -164,13 +193,12 @@
 }
 
 /// 当前文件 + 主文件 + 项目里的 .tex / .sty / .cls（模板常把字体写死在 .cls 里）。
-- (NSArray<NSURL *> *)fontFixCandidateFileURLs {
+- (NSArray<NSURL *> *)fontFixCandidateFileURLsForCurrentURL:(NSURL *)currentURL mainURL:(NSURL *)main projectURL:(NSURL *)projectURL {
     NSMutableOrderedSet<NSURL *> *urls = [NSMutableOrderedSet orderedSet];
-    if (self.host.currentDocumentFileURL) [urls addObject:self.host.currentDocumentFileURL.URLByStandardizingPath];
-    NSURL *main = [self.host mainFileURLForCompile];
+    if (currentURL) [urls addObject:currentURL.URLByStandardizingPath];
     if (main) [urls addObject:main.URLByStandardizingPath];
-    if (self.host.projectRootURL) {
-        NSMutableArray<TMFileNode *> *stack = [[TMProject fileTreeForDirectory:self.host.projectRootURL maxDepth:4] mutableCopy];
+    if (projectURL) {
+        NSMutableArray<TMFileNode *> *stack = [[TMProject fileTreeForDirectory:projectURL maxDepth:4] mutableCopy];
         while (stack.count && urls.count < 300) {
             TMFileNode *node = stack.lastObject;
             [stack removeLastObject];
@@ -181,14 +209,16 @@
     return urls.array;
 }
 
-- (void)offerReplacingMissingFonts:(NSArray<NSString *> *)missing {
+- (void)offerReplacingMissingFonts:(NSArray<NSString *> *)missing generation:(NSUInteger)generation {
     TMFontCatalog *catalog = [TMFontCatalog shared];
-    NSArray<NSURL *> *urls = [self fontFixCandidateFileURLs];
     NSURL *currentURL = self.host.currentDocumentFileURL.URLByStandardizingPath;
-    NSString *currentText = self.host.editorTextView.string;
+    NSURL *mainURL = [self.host mainFileURLForCompile];
+    NSURL *projectURL = self.host.projectRootURL;
+    NSString *currentText = [self.host.editorTextView.string copy];
 
     // 替换表：日志报的缺失字体 + 文件里其他本机也没有的“换台电脑就没了”的字体，一次改完，免得编译一次报一个
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSArray<NSURL *> *urls = [self fontFixCandidateFileURLsForCurrentURL:currentURL mainURL:mainURL projectURL:projectURL];
         NSMutableDictionary<NSURL *, NSString *> *contents = [NSMutableDictionary dictionary];
         NSMutableOrderedSet<NSString *> *names = [NSMutableOrderedSet orderedSetWithArray:missing];
         for (NSURL *url in urls) {
@@ -198,6 +228,7 @@
             [names addObjectsFromArray:[TMFontSettings knownReplaceableFontNamesInContent:text]];
         }
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self.requestGeneration) return;
             NSMutableDictionary<NSString *, NSString *> *replacements = [NSMutableDictionary dictionary];
             NSMutableArray<NSString *> *unresolved = [NSMutableArray array];
             for (NSString *name in names) {
@@ -221,7 +252,7 @@
                 [self.host showInfoMessage:[NSString stringWithFormat:@"本机没有字体“%@”，可在 编辑 › 文档字体… 里换一个", missing.firstObject]];
                 return;
             }
-            [self confirmFontReplacements:replacements unresolved:unresolved files:fixed missing:missing];
+            [self confirmFontReplacements:replacements unresolved:unresolved files:fixed missing:missing generation:generation];
         });
     });
 }
@@ -229,8 +260,9 @@
 - (void)confirmFontReplacements:(NSDictionary<NSString *, NSString *> *)replacements
                      unresolved:(NSArray<NSString *> *)unresolved
                           files:(NSDictionary<NSURL *, NSString *> *)files
-                        missing:(NSArray<NSString *> *)missing {
-    if (self.isShowingFontFixAlert) return;
+                        missing:(NSArray<NSString *> *)missing
+                     generation:(NSUInteger)generation {
+    if (generation != self.requestGeneration || self.activeSheet) return;
     NSMutableString *info = [NSMutableString string];
     for (NSString *from in [replacements.allKeys sortedArrayUsingSelector:@selector(localizedCaseInsensitiveCompare:)]) {
         TMFontFamily *to = [[TMFontCatalog shared] familyNamed:replacements[from]];
@@ -249,9 +281,7 @@
     [alert addButtonWithTitle:@"替换并重新编译"];
     [alert addButtonWithTitle:@"取消"];
     alert.buttons[1].keyEquivalent = @"\e";
-    self.isShowingFontFixAlert = YES;
-    [alert beginSheetModalForWindow:self.host.window completionHandler:^(NSModalResponse response) {
-        self.isShowingFontFixAlert = NO;
+    [self beginAlert:alert generation:generation completionHandler:^(NSModalResponse response) {
         if (response != NSAlertFirstButtonReturn) {
             [self.declinedFontFixes addObjectsFromArray:missing];
             return;
