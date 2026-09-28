@@ -23,6 +23,23 @@
 }
 @end
 
+@interface TMCompileEngineProbe : TMCompileProbe
+@property (nonatomic, copy) NSString *engineName;
+@property (nonatomic) BOOL usesLatexmk;
+@property (nonatomic) BOOL legacyStartCalled;
+@end
+@implementation TMCompileEngineProbe
+- (void)compilerDidStartCompilingDocument:(NSURL *)fileURL {
+    self.legacyStartCalled = YES;
+    [super compilerDidStartCompilingDocument:fileURL];
+}
+- (void)compilerDidStartCompilingDocument:(NSURL *)fileURL engineName:(NSString *)engineName useLatexmk:(BOOL)useLatexmk {
+    self.startedURL = fileURL;
+    self.engineName = engineName;
+    self.usesLatexmk = useLatexmk;
+}
+@end
+
 static BOOL waitFor(TMCompileProbe *probe, NSTimeInterval timeout) {
     NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
     while (!probe.finished && [deadline timeIntervalSinceNow] > 0) {
@@ -78,11 +95,14 @@ int main(void) {
 
         // 3. 显式选 xelatex：仍通过 latexmk，且成功
         compiler.engine = TMTeXEngineXeLaTeX;
-        TMCompileProbe *probe3 = [[TMCompileProbe alloc] init];
+        TMCompileEngineProbe *probe3 = [[TMCompileEngineProbe alloc] init];
         compiler.delegate = probe3;
         [compiler compileFileAtURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:@"main.tex"]]];
         CHECK(waitFor(probe3, 120), "xelatex compile timed out");
         CHECK(probe3.success, "xelatex compile should succeed");
+        CHECK([probe3.engineName isEqualToString:@"xelatex"], "start callback should report actual xelatex decision");
+        CHECK(probe3.usesLatexmk, "start callback should report latexmk scheduling");
+        CHECK(!probe3.legacyStartCalled, "extended delegate must receive only one start callback");
 
         for (NSString *name in @[@"main.tex", @"broken.tex"]) {
             [[NSFileManager defaultManager] removeItemAtURL:[TMCompiler auxiliaryDirectoryForTeXFileURL:[NSURL fileURLWithPath:[dir stringByAppendingPathComponent:name]]] error:nil];

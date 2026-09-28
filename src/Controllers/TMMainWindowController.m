@@ -6,6 +6,7 @@
 #import "TMLogDrawerView.h"
 #import "TMCompiler.h"
 #import "TMWordCounter.h"
+#import "TMCompileTargetResolver.h"
 #import "TMSyncTeX.h"
 #import "TMOutlineSidebarView.h"
 #import "TMOutlineParser.h"
@@ -98,8 +99,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, assign) BOOL isRetryingAfterAutoClean;
 /// 自动清理后重编仍失败的“主文件|辅助文件”：清理对它们没用，本次会话不再自动清理。
 @property (nonatomic, strong) NSMutableSet<NSString *> *unhelpfulAutoCleans;
-/// 状态栏“编译目标 · 引擎”的后台判断代次。
-@property (nonatomic, assign) NSUInteger compileTargetGeneration;
+@property (nonatomic, strong) TMCompileTargetResolver *compileTargetResolver;
 /// 标题 1 对应 \chapter（book / report / 学位论文类）还是 \section；随编译目标一起在后台判断。
 @property (nonatomic, assign) BOOL headingUsesChapters;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
@@ -148,6 +148,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
         _currentCursorCol = 1;
         _unhelpfulAutoCleans = [NSMutableSet set];
         _wordCounter = [[TMWordCounter alloc] init];
+        _compileTargetResolver = [[TMCompileTargetResolver alloc] init];
         _autoCompileEnabled = [TMPreferences shared].autoCompileEnabled;
         window.delegate = self;
 
@@ -606,6 +607,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
     NSInteger engine = p.defaultEngine;
     if (engine < TMTeXEngineLatexmk || engine > TMTeXEngineLuaLaTeX) engine = TMTeXEngineLatexmk;
+    BOOL engineChanged = [TMCompiler sharedCompiler].engine != (TMTeXEngine)engine;
     [TMCompiler sharedCompiler].engine = (TMTeXEngine)engine;
     [TMCompiler sharedCompiler].shellEscapeEnabled = p.shellEscapeEnabled;
     [TMCompiler sharedCompiler].auxFilesBesideSource = p.auxFilesBesideSource;
@@ -629,7 +631,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self.autoCompileTimer invalidate];
         self.autoCompileTimer = nil;
     }
-    [self refreshCompileTarget];
+    if (engineChanged) [self refreshCompileTarget];
 }
 
 #pragma mark - NSSplitViewDelegate (内层 代码|PDF 分栏，保证永不塌陷)
@@ -689,6 +691,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)loadDocumentIntoEditor {
     [self.wordCounter cancel];
+    [self.compileTargetResolver cancel];
     if (self.documentModel) {
         self.editorTextView.completionDocumentKey = self.documentModel.isScratch ? nil : self.documentModel.fileURL.URLByStandardizingPath.path;
         // 先确定新文档语法，只失效扫描缓存，不用新语法重画即将被替换的旧正文。
@@ -702,7 +705,6 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [self syncProjectRootWithDocument];
         [self startWatchingCurrentFile];
         [self refreshIssueMarks];
-        [self refreshCompileTarget];
         // 预览主文件的 PDF：编辑 chapters/ch1.tex 时右侧仍应显示 main.pdf
         [self showPDFIfExistsAtURL:[self expectedPDFURLForMainFile]];
         [self hideWelcome];
@@ -847,6 +849,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     // 切回来时立刻检查一次；vnode 事件偶尔会丢（例如网络盘）
     [self checkForExternalModification];
+    if (![self isShowingWelcome]) [self refreshCompileTarget];
 }
 
 - (void)openFolderAtURL:(NSURL *)folderURL {
@@ -907,6 +910,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     }
     if (!mapped) return;
     self.documentModel.fileURL = [NSURL fileURLWithPath:mapped];
+    [self refreshCompileTarget];
     [self refreshWindowTitle];
     [self startWatchingCurrentFile];
     [TMRecentFiles removeFileURL:oldURL];
@@ -929,6 +933,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     self.documentModel.content = self.editorTextView.string;
     self.documentModel.fileURL = nil;
     self.documentModel.isDirty = YES;
+    [self refreshCompileTarget];
     [self refreshWindowTitle];
     [browser selectFileURL:nil];
     [self.statusBar showInfoMessage:[NSString stringWithFormat:@"%@ 已移到废纸篓，编辑器内容保留为未命名文档", url.lastPathComponent]];
@@ -1054,6 +1059,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [[NSAlert alertWithError:err] runModal];
         return NO;
     }
+    [self refreshCompileTarget];
     [self refreshWindowTitle];
     [TMRecentFiles noteFileURL:panel.URL];
     [self syncProjectRootWithDocument];
@@ -1126,6 +1132,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)windowWillClose:(NSNotification *)notification {
     [self.wordCounter cancel];
+    [self.compileTargetResolver cancel];
     [self saveSessionState];
     // 计时器强引用 self：关窗时停掉，否则窗口关了还会触发编译 / 保存，控制器也释放不掉。
     // 不补做待执行的自动保存：用户可能刚在关闭确认里选了“不保存”。
@@ -1176,42 +1183,30 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 /// 状态栏常驻“目标文件 · 实际引擎”：与 compileFileAtURL: 的决策一致（主文件推断 → 手选 / 魔法注释 / ctex 检测）。
 - (void)refreshCompileTarget {
     if (!self.statusBar || !self.documentModel) return;
-    NSURL *main = [self mainFileURLForCompile];
     NSURL *currentURL = self.documentModel.fileURL;
-    BOOL isCurrent = !main || [main isEqual:currentURL];
     BOOL isScratch = self.documentModel.isScratch;
-    NSString *editorText = isCurrent ? [self.editorTextView.string copy] : nil;
-    NSString *currentText = editorText ?: [self.editorTextView.string copy];
-    NSUInteger generation = ++self.compileTargetGeneration;
+    TMTeXEngine preferredEngine = [TMCompiler sharedCompiler].engine;
     __weak typeof(self) weakSelf = self;
-
-    // 判断可能要读 .cls / 调 kpsewhich（首次约 0.2 秒），放后台，只采用最新一次的结果
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString *content = editorText ?: ([NSString stringWithContentsOfURL:main encoding:NSUTF8StringEncoding error:nil] ?: @"");
-        // 标题 1 对应 \chapter 还是 \section：看主文件的文档类
-        BOOL usesChapters = [TMFormatActions usesChaptersForMainContent:content currentContent:currentText];
-        NSString *reason = nil;
-        NSString *engine = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content
-                                                                         directoryURL:(main ?: currentURL).URLByDeletingLastPathComponent
-                                                                               reason:&reason];
-        BOOL hasLatexmk = [TMCompiler findExecutableNamed:@"latexmk"] != nil;
-
+    // 使用未保存正文的快照；目录枚举、主文件推断和依赖读取均在服务的后台队列执行。
+    [self.compileTargetResolver resolveDocumentURL:currentURL content:self.editorTextView.string
+                                         isScratch:isScratch preferredEngine:preferredEngine
+                                        completion:^(TMCompileTargetResult *result) {
+        typeof(self) self = weakSelf;
+        if (!self) return;
+        NSURL *main = result.mainFileURL;
+        BOOL isCurrent = !main || [main.URLByStandardizingPath.path isEqualToString:currentURL.URLByStandardizingPath.path];
         NSString *fileName = (!main || isScratch) ? @"未命名文档" : main.lastPathComponent;
         NSMutableString *tip = [NSMutableString string];
         if (main && !isScratch) {
             [tip appendFormat:@"编译文件：%@\n", main.path.stringByAbbreviatingWithTildeInPath];
             if (!isCurrent) [tip appendFormat:@"（当前编辑的 %@ 不是主文件，⌘↩ 编译的是它）\n", currentURL.lastPathComponent];
         }
-        [tip appendFormat:@"引擎：%@ — %@", TMEngineDisplayName(engine), reason];
-        if (hasLatexmk) [tip appendString:@"\n由 latexmk 调度（自动处理多遍编译与参考文献）"];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (weakSelf.compileTargetGeneration != generation) return;
-            [weakSelf.statusBar setCompileTargetFileName:fileName engine:TMEngineDisplayName(engine) toolTip:tip];
-            weakSelf.headingUsesChapters = usesChapters;
-            [weakSelf refreshParagraphStyleIndicator];
-        });
-    });
+        [tip appendFormat:@"引擎：%@ — %@", TMEngineDisplayName(result.engineName), result.reason];
+        if (result.usesLatexmk) [tip appendString:@"\n由 latexmk 调度（自动处理多遍编译与参考文献）"];
+        [self.statusBar setCompileTargetFileName:fileName engine:TMEngineDisplayName(result.engineName) toolTip:tip];
+        self.headingUsesChapters = result.usesChapters;
+        [self refreshParagraphStyleIndicator];
+    }];
 }
 
 #pragma mark - 问题列表与行号槽标记
@@ -1367,10 +1362,8 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     }
 }
 
-- (void)compilerDidStartCompilingDocument:(NSURL *)fileURL {
-    NSString *content = [NSString stringWithContentsOfURL:fileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
-    NSString *engineName = [[TMCompiler sharedCompiler] effectiveEngineNameForContent:content directoryURL:fileURL.URLByDeletingLastPathComponent reason:NULL];
-    if ([TMCompiler findExecutableNamed:@"latexmk"]) {
+- (void)compilerDidStartCompilingDocument:(NSURL *)fileURL engineName:(NSString *)engineName useLatexmk:(BOOL)useLatexmk {
+    if (useLatexmk) {
         engineName = [NSString stringWithFormat:@"latexmk · %@", engineName];
     }
     if (![fileURL isEqual:self.documentModel.fileURL]) {
@@ -1522,6 +1515,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 - (void)textDidChange:(NSNotification *)notification {
     // 立即停止旧文本统计；新快照仍沿用大纲的 250 ms 防抖。
     [self.wordCounter cancel];
+    [self.compileTargetResolver cancel];
     if (!self.documentModel.isDirty) {
         self.documentModel.isDirty = YES;
         self.window.documentEdited = YES;
@@ -1825,6 +1819,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     [self.statusBar showReadyState];
     [self showWelcome];
     [self.wordCounter cancel];
+    [self.compileTargetResolver cancel];
 }
 
 #pragma mark - TMWelcomeViewDelegate

@@ -13,6 +13,8 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 @protocol TMCompilerDelegate <NSObject>
 @optional
 - (void)compilerDidStartCompilingDocument:(NSURL *)fileURL;
+/// 优先调用此接口，将本次已决定的引擎传给 UI；旧接口作为兼容后备。
+- (void)compilerDidStartCompilingDocument:(NSURL *)fileURL engineName:(NSString *)engineName useLatexmk:(BOOL)useLatexmk;
 - (void)compilerDidOutputLog:(NSString *)text;
 - (void)compilerDidFinishSuccess:(double)durationSeconds pdfURL:(NSURL *)pdfURL issues:(NSArray<TMLogIssue *> *)issues;
 - (void)compilerDidFailWithError:(NSString *)summary line:(NSInteger)lineNumber fullLog:(NSString *)log issues:(NSArray<TMLogIssue *> *)issues;
@@ -63,6 +65,11 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 /// 找不到的非标准文档类再问 kpsewhich。reason 返回判断依据（状态栏 tooltip 用）。
 - (NSString *)effectiveEngineNameForContent:(NSString *)content
                                directoryURL:(nullable NSURL *)directoryURL
+                                     reason:(NSString * _Nullable * _Nullable)reason;
+/// 后台预览传入偏好快照，判断期间不再读取可变的 self.engine。
+- (NSString *)effectiveEngineNameForContent:(NSString *)content
+                               directoryURL:(nullable NSURL *)directoryURL
+                            preferredEngine:(TMTeXEngine)preferredEngine
                                      reason:(NSString * _Nullable * _Nullable)reason;
 
 @end

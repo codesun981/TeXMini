@@ -1,6 +1,15 @@
 #import "TMProject.h"
 #import "TMMagicComments.h"
 #import "TMLaTeXScanner.h"
+#include <sys/stat.h>
+
+@interface TMProjectCandidate : NSObject
+@property (nonatomic, copy) NSArray<NSNumber *> *fingerprint;
+@property (nonatomic) BOOL declaresDocumentClass;
+@property (nonatomic, copy) NSSet<NSString *> *referencedBaseNames;
+@end
+@implementation TMProjectCandidate
+@end
 
 @implementation TMFileNode
 @end
@@ -124,22 +133,37 @@
     return result;
 }
 
-/// 读取候选 .tex 的内容；按修改时间缓存，文件没变就不重复读盘（主文件推断每次加载 / 编译都会跑）。
-+ (nullable NSString *)cachedContentsOfTeXFileURL:(NSURL *)url {
-    static NSCache<NSString *, NSArray *> *cache;
+static NSArray<NSNumber *> *TMCandidateFingerprint(NSURL *url) {
+    struct stat info;
+    if (stat(url.fileSystemRepresentation, &info) != 0) return nil;
+    return @[@(info.st_dev), @(info.st_ino), @(info.st_size),
+             @(info.st_mtimespec.tv_sec), @(info.st_mtimespec.tv_nsec),
+             @(info.st_ctimespec.tv_sec), @(info.st_ctimespec.tv_nsec)];
+}
+
+/// 仅缓存候选的解析事实，不缓存最终主文件关系；每次推断仍检查目录成员与文件指纹。
++ (nullable TMProjectCandidate *)cachedCandidateForTeXFileURL:(NSURL *)url {
+    static NSCache<NSString *, TMProjectCandidate *> *cache;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         cache = [[NSCache alloc] init];
         cache.countLimit = 256;
     });
-    NSDate *modified = nil;
-    [url removeCachedResourceValueForKey:NSURLContentModificationDateKey];
-    [url getResourceValue:&modified forKey:NSURLContentModificationDateKey error:nil];
-    NSArray *entry = [cache objectForKey:url.path];
-    if (modified && entry && [entry[0] isEqualToDate:modified]) return entry[1];
+    NSString *key = url.URLByStandardizingPath.path;
+    NSArray *fingerprint = TMCandidateFingerprint(url);
+    if (!fingerprint) { [cache removeObjectForKey:key]; return nil; }
+    TMProjectCandidate *entry = [cache objectForKey:key];
+    if ([entry.fingerprint isEqual:fingerprint]) return entry;
     NSString *content = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil];
-    if (modified && content) [cache setObject:@[modified, content] forKey:url.path];
-    return content;
+    if (!content) { [cache removeObjectForKey:key]; return nil; }
+    entry = [TMProjectCandidate new];
+    entry.fingerprint = fingerprint;
+    entry.declaresDocumentClass = [self contentDeclaresDocumentClass:content];
+    entry.referencedBaseNames = entry.declaresDocumentClass ? [self referencedBaseNamesInContent:content] : [NSSet set];
+    // 读取期间发生原子替换或写入时，不把快照绑定到旧指纹；下次调用重新读取。
+    if ([fingerprint isEqual:TMCandidateFingerprint(url)]) [cache setObject:entry forKey:key];
+    else [cache removeObjectForKey:key];
+    return entry;
 }
 
 + (nullable NSURL *)mainFileURLForDocumentURL:(NSURL *)documentURL content:(NSString *)content {
@@ -159,9 +183,9 @@
     NSMutableArray<NSURL *> *candidates = [NSMutableArray array];
     for (NSURL *u in [self topLevelTeXFilesInDirectory:dir]) {
         if ([u.URLByStandardizingPath isEqual:documentURL.URLByStandardizingPath]) continue;
-        NSString *c = [self cachedContentsOfTeXFileURL:u];
-        if (![self contentDeclaresDocumentClass:c]) continue;
-        if ([[self referencedBaseNamesInContent:c] containsObject:myBase]) return u;
+        TMProjectCandidate *candidate = [self cachedCandidateForTeXFileURL:u];
+        if (!candidate.declaresDocumentClass) continue;
+        if ([candidate.referencedBaseNames containsObject:myBase]) return u;
         [candidates addObject:u];
     }
     // 子目录里的 chapter 文件：再向上看一层父目录
@@ -170,9 +194,9 @@
         if (parent && ![parent isEqual:dir]) {
             NSString *relBase = [NSString stringWithFormat:@"%@/%@", dir.lastPathComponent, myBase];
             for (NSURL *u in [self topLevelTeXFilesInDirectory:parent]) {
-                NSString *c = [self cachedContentsOfTeXFileURL:u];
-                if (![self contentDeclaresDocumentClass:c]) continue;
-                NSSet *refs = [self referencedBaseNamesInContent:c];
+                TMProjectCandidate *candidate = [self cachedCandidateForTeXFileURL:u];
+                if (!candidate.declaresDocumentClass) continue;
+                NSSet *refs = candidate.referencedBaseNames;
                 if ([refs containsObject:myBase] || [refs containsObject:relBase]) return u;
                 [candidates addObject:u];
             }
@@ -212,10 +236,10 @@
     NSMutableDictionary<NSURL *, NSNumber *> *refCounts = [NSMutableDictionary dictionary];
 
     for (NSURL *u in [self topLevelTeXFilesInDirectory:directoryURL]) {
-        NSString *c = [self cachedContentsOfTeXFileURL:u];
-        if (![self contentDeclaresDocumentClass:c]) continue;
+        TMProjectCandidate *candidate = [self cachedCandidateForTeXFileURL:u];
+        if (!candidate.declaresDocumentClass) continue;
         [candidates addObject:u];
-        refCounts[u] = @([self referencedBaseNamesInContent:c].count);
+        refCounts[u] = @(candidate.referencedBaseNames.count);
     }
     if (candidates.count == 0) return nil;
     if (candidates.count == 1) return candidates.firstObject;

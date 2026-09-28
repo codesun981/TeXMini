@@ -3,11 +3,14 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <libproc.h>
 #import <signal.h>
+#include <sys/stat.h>
 
 @interface TMCompiler ()
 @property (nonatomic, assign) BOOL isCompiling;
 @property (nonatomic, assign) BOOL wasCancelled;
 @property (nonatomic, strong) NSTask *currentTask;
+@property (nonatomic, strong) NSCache<NSArray *, NSArray *> *engineDecisionCache;
+@property (nonatomic, strong) NSCache<NSString *, NSArray *> *dependencyFeatureCache;
 @end
 
 /// 解码 data 中完整的 UTF-8 前缀并从 data 中移除；末尾被截断的多字节字符留在 data 里。
@@ -133,43 +136,27 @@ static NSString *TMKpsewhich(NSString *fileName) {
     return path;
 }
 
-/// 读取依赖文件（去掉注释）；按修改时间缓存，文件没变不重复读盘（状态栏会反复询问）。
-static NSString *TMDependencyCode(NSString *path) {
-    static NSCache<NSString *, NSArray *> *cache;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{ cache = [[NSCache alloc] init]; });
-    NSDate *modified = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil][NSFileModificationDate];
-    if (!modified) return nil;
-    NSArray *entry = [cache objectForKey:path];
-    if (entry && [entry[0] isEqualToDate:modified]) return entry[1];
-    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
-                  ?: [NSString stringWithContentsOfFile:path encoding:NSISOLatin1StringEncoding error:nil];
-    if (!text) return nil;
-    NSString *code = TMStripTeXComments(text);
-    [cache setObject:@[modified, code] forKey:path];
-    return code;
+/// 空数组也缓存：不存在的本地依赖之后出现时必须使决策失效。
+static NSArray *TMEngineFileFingerprint(NSString *path) {
+    struct stat info;
+    if (stat(path.fileSystemRepresentation, &info) != 0) return @[];
+    return @[@(info.st_dev), @(info.st_ino), @(info.st_size),
+             @(info.st_mtimespec.tv_sec), @(info.st_mtimespec.tv_nsec),
+             @(info.st_ctimespec.tv_sec), @(info.st_ctimespec.tv_nsec)];
 }
 
-/// 顺着依赖找需要 XeLaTeX 的 .cls / .sty，返回第一个命中的文件名；depth 为剩余层数。
-/// 先找 directoryURL（项目目录）；找不到的非标准文档类再问 kpsewhich（宏包太多，不逐个查）。
-static NSString *TMDependencyNeedingXeTeX(NSString *code, NSURL *directoryURL, NSUInteger depth) {
-    if (depth == 0) return nil;
-    for (NSString *fileName in TMDependencyFileNames(code)) {
-        NSString *path = nil;
-        if (directoryURL) {
-            NSString *local = [directoryURL.path stringByAppendingPathComponent:fileName];
-            if ([[NSFileManager defaultManager] fileExistsAtPath:local]) path = local;
-        }
-        if (!path && [fileName.pathExtension isEqualToString:@"cls"] && !TMIsStandardClass(fileName)) {
-            path = TMKpsewhich(fileName);
-        }
-        NSString *dependency = path ? TMDependencyCode(path) : nil;
-        if (!dependency) continue;
-        if (TMNeedsXeTeXKeyword(dependency)) return fileName;
-        NSString *nested = TMDependencyNeedingXeTeX(dependency, path.stringByDeletingLastPathComponent.length ? [NSURL fileURLWithPath:path.stringByDeletingLastPathComponent] : directoryURL, depth - 1);
-        if (nested) return [NSString stringWithFormat:@"%@ → %@", fileName, nested];
+static BOOL TMEngineFingerprintsUnchanged(NSDictionary<NSString *, id> *fingerprints) {
+    for (NSString *path in fingerprints) {
+        if (![fingerprints[path] isEqual:TMEngineFileFingerprint(path)]) return NO;
     }
-    return nil;
+    return YES;
+}
+
+/// 同一路径若在一次遍历中变化，或读取失败，用 NSNull 保留“不稳定”状态，后续不能覆盖它。
+static void TMRecordEngineFingerprint(NSMutableDictionary *fingerprints, NSString *path, NSArray *fingerprint) {
+    id previous = fingerprints[path];
+    if (!previous) fingerprints[path] = fingerprint;
+    else if (![previous isEqual:fingerprint]) fingerprints[path] = NSNull.null;
 }
 
 /// 先结束子孙进程再结束自身（SIGTERM）。
@@ -199,6 +186,10 @@ static void TMTerminateProcessTree(pid_t pid) {
         _isCompiling = NO;
         _shellEscapeEnabled = NO;
         _extraArguments = @[];
+        _engineDecisionCache = [NSCache new];
+        _engineDecisionCache.countLimit = 64;
+        _dependencyFeatureCache = [NSCache new];
+        _dependencyFeatureCache.countLimit = 256;
     }
     return self;
 }
@@ -244,6 +235,61 @@ static void TMTerminateProcessTree(pid_t pid) {
 
 #pragma mark - 引擎决策
 
+/// 依赖只保留与引擎有关的特征，不长期保留整个 .cls/.sty 正文。
+- (NSArray *)engineDependencyFeaturesForText:(NSString *)text {
+    NSString *code = TMStripTeXComments(text);
+    return @[@(TMNeedsXeTeXKeyword(code)), TMDependencyFileNames(code)];
+}
+
+- (NSArray *)dependencyFeaturesAtPath:(NSString *)path fingerprint:(NSArray *)fingerprint {
+    if (fingerprint.count == 0) return nil;
+    NSArray *entry = [self.dependencyFeatureCache objectForKey:path];
+    if (entry && [entry[0] isEqual:fingerprint]) return entry[1];
+    NSString *text = [NSString stringWithContentsOfFile:path encoding:NSUTF8StringEncoding error:nil]
+                  ?: [NSString stringWithContentsOfFile:path encoding:NSISOLatin1StringEncoding error:nil];
+    if (!text) return nil;
+    NSArray *features = [self engineDependencyFeaturesForText:text];
+    // 外部程序可能在读盘/解析期间改写文件；这样的快照不进入缓存。
+    if ([fingerprint isEqual:TMEngineFileFingerprint(path)]) {
+        [self.dependencyFeatureCache setObject:@[fingerprint, features] forKey:path];
+    }
+    return features;
+}
+
+/// 与原行为一样，按出现顺序最多查两层，命中后立即停止。
+- (NSString *)dependencyNeedingXeTeX:(NSArray<NSString *> *)names directoryURL:(NSURL *)directoryURL
+                              depth:(NSUInteger)depth fingerprints:(NSMutableDictionary *)fingerprints {
+    if (depth == 0) return nil;
+    for (NSString *fileName in names) {
+        NSString *path = nil;
+        NSArray *fingerprint = nil;
+        if (directoryURL) {
+            NSString *local = [[directoryURL.path stringByAppendingPathComponent:fileName] stringByStandardizingPath];
+            fingerprint = TMEngineFileFingerprint(local);
+            TMRecordEngineFingerprint(fingerprints, local, fingerprint);
+            if (fingerprint.count) path = local;
+        }
+        if (!path && [fileName.pathExtension isEqualToString:@"cls"] && !TMIsStandardClass(fileName)) {
+            path = TMKpsewhich(fileName);
+            if (path) {
+                fingerprint = TMEngineFileFingerprint(path);
+                TMRecordEngineFingerprint(fingerprints, path, fingerprint);
+            }
+        }
+        NSArray *features = path ? [self dependencyFeaturesAtPath:path fingerprint:fingerprint] : nil;
+        if (!features) {
+            if (path && fingerprint.count) fingerprints[path] = NSNull.null;
+            continue;
+        }
+        if ([features[0] boolValue]) return fileName;
+        NSString *nested = [self dependencyNeedingXeTeX:features[1]
+                                          directoryURL:[NSURL fileURLWithPath:path.stringByDeletingLastPathComponent]
+                                                 depth:depth - 1 fingerprints:fingerprints];
+        if (nested) return [NSString stringWithFormat:@"%@ → %@", fileName, nested];
+    }
+    return nil;
+}
+
 /// 返回 xelatex / pdflatex / lualatex 之一。
 - (NSString *)effectiveEngineNameForContent:(NSString *)content {
     return [self effectiveEngineNameForContent:content directoryURL:nil reason:NULL];
@@ -252,17 +298,24 @@ static void TMTerminateProcessTree(pid_t pid) {
 - (NSString *)effectiveEngineNameForContent:(NSString *)content
                                directoryURL:(nullable NSURL *)directoryURL
                                      reason:(NSString **)reason {
+    return [self effectiveEngineNameForContent:content directoryURL:directoryURL preferredEngine:self.engine reason:reason];
+}
+
+- (NSString *)effectiveEngineNameForContent:(NSString *)content
+                               directoryURL:(nullable NSURL *)directoryURL
+                            preferredEngine:(TMTeXEngine)preferredEngine
+                                     reason:(NSString **)reason {
     NSString *why = nil;
-    NSString *engine = [self decideEngineForContent:content ?: @"" directoryURL:directoryURL reason:&why];
+    NSString *engine = [self decideEngineForContent:content ?: @"" directoryURL:directoryURL preferredEngine:preferredEngine reason:&why];
     if (reason) *reason = why;
     return engine;
 }
 
-- (NSString *)decideEngineForContent:(NSString *)content directoryURL:(nullable NSURL *)directoryURL reason:(NSString **)reason {
-    if (self.engine != TMTeXEngineLatexmk) {
+- (NSString *)decideEngineForContent:(NSString *)content directoryURL:(nullable NSURL *)directoryURL preferredEngine:(TMTeXEngine)preferredEngine reason:(NSString **)reason {
+    if (preferredEngine != TMTeXEngineLatexmk) {
         *reason = @"手动选择的引擎";
-        if (self.engine == TMTeXEngineXeLaTeX) return @"xelatex";
-        if (self.engine == TMTeXEngineLuaLaTeX) return @"lualatex";
+        if (preferredEngine == TMTeXEngineXeLaTeX) return @"xelatex";
+        if (preferredEngine == TMTeXEngineLuaLaTeX) return @"lualatex";
         return @"pdflatex";
     }
 
@@ -279,21 +332,31 @@ static void TMTerminateProcessTree(pid_t pid) {
         return @"xelatex";
     }
 
-    // 中文模板常把 ctex 藏在 .cls 里，正文只有一行 \documentclass{thuthesis}
-    NSString *culprit = TMDependencyNeedingXeTeX(code, directoryURL, 2);
+    NSArray *dependencies = TMDependencyFileNames(code);
+    BOOL hasCJK = TMContainsCJK(code);
+    BOOL wrapsCJK = [code containsString:@"{CJK"] || [code containsString:@"CJKutf8"];
+    NSURL *directory = directoryURL.URLByStandardizingPath;
+    NSArray *key = @[directory.path ?: @"", dependencies, @(hasCJK), @(wrapsCJK)];
+    // NSCache 支持并发访问；不把磁盘/kpsewhich 包在锁里，实际编译不等后台预览的慢目录。
+    NSArray *entry = [self.engineDecisionCache objectForKey:key];
+    if (entry && TMEngineFingerprintsUnchanged(entry[2])) { *reason = entry[1]; return entry[0]; }
+
+    NSMutableDictionary *fingerprints = [NSMutableDictionary dictionary];
+    NSString *culprit = [self dependencyNeedingXeTeX:dependencies directoryURL:directory depth:2 fingerprints:fingerprints];
+    NSString *engine = @"pdflatex";
+    NSString *why = @"自动：未检测到中文或字体宏包，使用 pdfLaTeX";
     if (culprit) {
-        *reason = [NSString stringWithFormat:@"自动：%@ 里加载了 ctex / xeCJK / fontspec 等需要 XeLaTeX 的宏包", culprit];
-        return @"xelatex";
+        engine = @"xelatex";
+        why = [NSString stringWithFormat:@"自动：%@ 里加载了 ctex / xeCJK / fontspec 等需要 XeLaTeX 的宏包", culprit];
+    } else if (hasCJK && !wrapsCJK) {
+        engine = @"xelatex";
+        why = @"自动：正文含中文字符";
     }
-
-    // 有汉字但没用 pdfLaTeX 的 CJK 宏包：pdfLaTeX 基本编不出中文
-    if (TMContainsCJK(code) && ![code containsString:@"{CJK"] && ![code containsString:@"CJKutf8"]) {
-        *reason = @"自动：正文含中文字符";
-        return @"xelatex";
+    if (TMEngineFingerprintsUnchanged(fingerprints)) {
+        [self.engineDecisionCache setObject:@[engine, why, [fingerprints copy]] forKey:key];
     }
-
-    *reason = @"自动：未检测到中文或字体宏包，使用 pdfLaTeX";
-    return @"pdflatex";
+    *reason = why;
+    return engine;
 }
 
 + (NSString *)latexmkFlagForEngineName:(NSString *)name {
@@ -411,7 +474,9 @@ static void TMTerminateProcessTree(pid_t pid) {
     self.wasCancelled = NO;
     NSDate *startTime = [NSDate date];
 
-    if ([self.delegate respondsToSelector:@selector(compilerDidStartCompilingDocument:)]) {
+    if ([self.delegate respondsToSelector:@selector(compilerDidStartCompilingDocument:engineName:useLatexmk:)]) {
+        [self.delegate compilerDidStartCompilingDocument:texFileURL engineName:engineName useLatexmk:(latexmkPath != nil)];
+    } else if ([self.delegate respondsToSelector:@selector(compilerDidStartCompilingDocument:)]) {
         [self.delegate compilerDidStartCompilingDocument:texFileURL];
     }
 
