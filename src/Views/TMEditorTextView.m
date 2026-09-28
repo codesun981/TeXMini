@@ -16,6 +16,11 @@ static NSString *const kTMIndentUnit = @"  ";
     NSRange _pendingHighlightRange;
     BOOL _highlightScheduled;
     TMLineIndex *_lineIndex;
+    NSUInteger _textRevision;
+    NSUInteger _completionGeneration;
+    BOOL _completionWanted;
+    BOOL _completionRefreshScheduled;
+    BOOL _completionInFlight;
 }
 
 - (void)setupEditor {
@@ -64,7 +69,22 @@ static NSString *const kTMIndentUnit = @"  ";
 
 - (void)textStorageWillProcessEditingNotification:(NSNotification *)note {
     // 在 didProcess / 选区及行号尺刷新之前失效，不依赖多个观察者的调用顺序。
-    if (((NSTextStorage *)note.object).editedMask & NSTextStorageEditedCharacters) _lineIndex = nil;
+    if (((NSTextStorage *)note.object).editedMask & NSTextStorageEditedCharacters) {
+        _lineIndex = nil;
+        _textRevision++;
+        _completionGeneration++;
+        _completionInFlight = NO;
+    }
+}
+
+- (void)setString:(NSString *)string {
+    [self dismissCompletion];
+    [super setString:string];
+}
+
+- (void)setCompletionDocumentKey:(NSString *)key {
+    [self dismissCompletion];
+    _completionDocumentKey = [key copy] ?: NSUUID.UUID.UUIDString;
 }
 
 - (void)rehighlightAll {
@@ -508,9 +528,8 @@ static unichar TMMatchingBracket(unichar c) {
     if (!self.completionProvider) return;
     TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
     if (ctx.kind == TMCompletionKindCitation || ctx.kind == TMCompletionKindReference || ctx.kind == TMCompletionKindEnvironment) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self complete:nil];
-        });
+        _completionWanted = YES;
+        [self refreshCompletionIfNeeded];
     }
 }
 
@@ -546,41 +565,92 @@ static unichar TMMatchingBracket(unichar c) {
 }
 
 /// 按光标处的上下文重新计算候选；没有上下文或没有候选就收起。
+- (void)dismissCompletion {
+    _completionWanted = NO;
+    _completionInFlight = NO;
+    _completionGeneration++;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoCompleteCommand) object:nil];
+    [_completionPopup hide];
+}
+
+- (void)refreshCompletionIfNeeded {
+    if (!_completionWanted || _completionRefreshScheduled) return;
+    _completionRefreshScheduled = YES;
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        TMEditorTextView *editor = weakSelf;
+        if (!editor) return;
+        editor->_completionRefreshScheduled = NO;
+        if (editor->_completionWanted) [editor showCompletionPopup];
+    });
+}
+
 - (void)showCompletionPopup {
-    if (!self.completionProvider || self.hasMarkedText || self.selectedRange.length > 0 || !self.window) {
-        [self.completionPopup hide];
+    if (!self.completionProvider || self.hasMarkedText || self.selectedRanges.count != 1 ||
+        self.selectedRange.length > 0 || !self.window.isKeyWindow || self.window.firstResponder != self) {
+        [self dismissCompletion];
         return;
     }
     TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
-    NSArray<NSString *> *items = ctx.kind == TMCompletionKindNone ? @[] : [self.completionProvider completionsForContext:ctx currentText:self.string];
-    if (items.count == 0) {
-        [self.completionPopup hide];
-        return;
-    }
-    NSRect anchor = [self firstRectForCharacterRange:ctx.partialRange actualRange:NULL];
-    [self.completionPopup showItems:items partial:ctx.partial anchorOnScreen:anchor parentWindow:self.window font:self.font];
+    if (ctx.kind == TMCompletionKindNone) { [self dismissCompletion]; return; }
+    _completionWanted = YES;
+    _completionInFlight = YES;
+    NSUInteger generation = ++_completionGeneration;
+    NSUInteger revision = _textRevision;
+    NSRange selection = self.selectedRange;
+    if (!_completionDocumentKey) _completionDocumentKey = NSUUID.UUID.UUIDString;
+    NSString *key = self.completionDocumentKey;
+    __weak typeof(self) weakSelf = self;
+    [self.completionProvider requestCompletionsForContext:ctx currentText:self.string documentKey:key revision:revision
+                                             completion:^(NSArray<NSString *> *items) {
+        TMEditorTextView *editor = weakSelf;
+        if (!editor || editor->_completionGeneration != generation || !editor->_completionWanted) return;
+        if (editor->_textRevision != revision || ![editor.completionDocumentKey isEqualToString:key] ||
+            !NSEqualRanges(editor.selectedRange, selection) || editor.selectedRanges.count != 1 ||
+            editor.hasMarkedText || !editor.window.isKeyWindow || editor.window.firstResponder != editor) {
+            [editor dismissCompletion];
+            return;
+        }
+        editor->_completionInFlight = NO;
+        if (items.count == 0) {
+            [editor dismissCompletion];
+        } else {
+            NSRect anchor = [editor firstRectForCharacterRange:ctx.partialRange actualRange:NULL];
+            [editor.completionPopup showItems:items partial:ctx.partial anchorOnScreen:anchor parentWindow:editor.window font:editor.font];
+        }
+    }];
 }
 
 - (void)didChangeText {
     [super didChangeText];
-    // 浮窗开着时，打字 / 退格都让列表跟着过滤
-    if (!_acceptingCompletion && self.completionPopup.isVisible) [self showCompletionPopup];
+    if (self.hasMarkedText) { [self dismissCompletion]; return; }
+    if (!_acceptingCompletion) [self refreshCompletionIfNeeded];
 }
 
 - (BOOL)resignFirstResponder {
-    [_completionPopup hide];
+    [self dismissCompletion];
     return [super resignFirstResponder];
 }
 
 - (void)viewWillMoveToWindow:(NSWindow *)newWindow {
-    [_completionPopup hide];
+    [self dismissCompletion];
     [super viewWillMoveToWindow:newWindow];
 }
 
 /// 浮窗开着时拦下 ↑↓ 回车 Tab Esc；返回 NO 表示这个键照常交给编辑器
 - (BOOL)handleCompletionKey:(NSEvent *)event {
-    if (!_completionPopup.isVisible) return NO;
+    if (self.hasMarkedText) { [self dismissCompletion]; return NO; }
+    if (!_completionWanted && !_completionPopup.isVisible) return NO;
     if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl | NSEventModifierFlagOption)) return NO;
+    if (event.keyCode == 53) { [self dismissCompletion]; return YES; }
+    if (_completionInFlight || _completionRefreshScheduled) {
+        if (event.keyCode == 125 || event.keyCode == 126 || event.keyCode == 36 || event.keyCode == 76 || event.keyCode == 48) {
+            // 最新候选尚未到达，交回正常编辑，绝不吞键或接受旧候选。
+            [self dismissCompletion];
+            return NO;
+        }
+    }
+    if (!_completionPopup.isVisible) return NO;
     switch (event.keyCode) {
         case 125: [self.completionPopup moveSelectionBy:1]; return YES;   // ↓
         case 126: [self.completionPopup moveSelectionBy:-1]; return YES;  // ↑
@@ -590,14 +660,16 @@ static unichar TMMatchingBracket(unichar c) {
             [self acceptCompletion:item];
             return YES;
         }
-        case 53: [self.completionPopup hide]; return YES;                  // Esc
+        case 53: [self dismissCompletion]; return YES;                  // Esc
         default: return NO;
     }
 }
 
 /// 用选中的候选替换光标处正在输入的那段
 - (void)acceptCompletion:(NSString *)word {
-    [self.completionPopup hide];
+    // 双击也不能接受仍在刷新中的旧候选。
+    if (_completionInFlight || _completionRefreshScheduled) return;
+    [self dismissCompletion];
     TMCompletionContext *ctx = [TMCompletionProvider contextInText:self.string cursorLocation:self.selectedRange.location];
     if (ctx.kind == TMCompletionKindNone) return;
     NSRange range = ctx.partialRange;
@@ -637,6 +709,7 @@ static unichar TMMatchingBracket(unichar c) {
 }
 
 - (void)mouseDown:(NSEvent *)event {
+    [self dismissCompletion];
     if ((event.modifierFlags & NSEventModifierFlagCommand) && event.clickCount == 1) {
         // 先把光标放到点击处，再让控制器按新光标行做正向同步
         NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
@@ -647,7 +720,6 @@ static unichar TMMatchingBracket(unichar c) {
         }
         return;
     }
-    [_completionPopup hide];
     [super mouseDown:event];
     // 双击：保留系统的选词行为，同时把 PDF 同步到这一行
     if (event.clickCount == 2 && [self.editorDelegate respondsToSelector:@selector(editorTextViewDidRequestForwardSync)]) {
@@ -761,10 +833,13 @@ static unichar TMMatchingBracket(unichar c) {
     [super setSelectedRanges:selectedRanges affinity:affinity stillSelecting:stillSelecting];
 
     // 光标左右移出了正在补全的词，就收起补全浮窗（放到下一轮，等文字和选区都更新完）
-    if (_completionPopup.isVisible && !_acceptingCompletion) {
-        dispatch_async(dispatch_get_main_queue(), ^{
-            if (self->_completionPopup.isVisible) [self showCompletionPopup];
-        });
+    if (_completionWanted && !_acceptingCompletion) {
+        if (!NSEqualRanges(previous, self.selectedRange)) {
+            _completionGeneration++;
+            _completionInFlight = NO;
+        }
+        if (selectedRanges.count != 1 || self.selectedRange.length || stillSelecting) [self dismissCompletion];
+        else [self refreshCompletionIfNeeded];
     }
 
     if (selectedRanges.count > 0) {

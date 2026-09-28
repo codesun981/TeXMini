@@ -1,9 +1,19 @@
 #import "TMCompletionProvider.h"
+#include <sys/stat.h>
 
 @implementation TMCompletionContext
 @end
 
 @interface TMCompletionProvider ()
+@property (nonatomic, strong) dispatch_queue_t workQueue;
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSArray *> *fileEntries;
+@property (nonatomic, copy) NSArray<NSString *> *orderedPaths;
+@property (nonatomic, copy, nullable) NSString *excludedPath;
+@property (nonatomic, copy, nullable) NSString *currentDocumentKey;
+@property (nonatomic) NSUInteger currentRevision;
+@property (nonatomic, copy, nullable) NSString *currentTextSnapshot;
+@property (nonatomic, copy) NSArray<NSArray<NSString *> *> *currentSymbols;
+@property (nonatomic) NSUInteger latestRequest;
 @property (nonatomic, copy) NSArray<NSString *> *cachedLabels;
 @property (nonatomic, copy) NSArray<NSString *> *cachedCitations;
 @property (nonatomic, copy) NSArray<NSString *> *cachedEnvironments;
@@ -13,6 +23,33 @@
 @end
 
 @implementation TMCompletionProvider
+@synthesize projectRootURL = _projectRootURL;
+
+static void *TMCompletionQueueKey = &TMCompletionQueueKey;
+
+- (instancetype)init {
+    if ((self = [super init])) {
+        _workQueue = dispatch_queue_create("app.texmini.completion", DISPATCH_QUEUE_SERIAL);
+        dispatch_queue_set_specific(_workQueue, TMCompletionQueueKey, (__bridge void *)self, NULL);
+        _fileEntries = [NSMutableDictionary dictionary];
+        _orderedPaths = @[];
+    }
+    return self;
+}
+
+- (NSURL *)projectRootURL {
+    @synchronized (self) { return _projectRootURL; }
+}
+
+- (void)setProjectRootURL:(NSURL *)url {
+    NSURL *root = url.URLByStandardizingPath;
+    @synchronized (self) {
+        if (_projectRootURL == root || [_projectRootURL isEqual:root]) return;
+        _projectRootURL = root;
+        ++_latestRequest;
+        dispatch_async(self.workQueue, ^{ self.cacheDate = nil; });
+    }
+}
 
 #pragma mark - 上下文分析
 
@@ -176,25 +213,47 @@ static NSArray<NSString *> *TMCaptures(NSString *pattern, NSString *text) {
 #pragma mark - 项目扫描与缓存
 
 - (void)invalidate {
-    self.cacheDate = nil;
+    @synchronized (self) {
+        ++_latestRequest;
+        dispatch_async(self.workQueue, ^{ self.cacheDate = nil; });
+    }
 }
 
-- (void)rescanIfNeeded {
-    if (self.cacheDate && [self.cacheRoot isEqual:self.projectRootURL] &&
-        [[NSDate date] timeIntervalSinceDate:self.cacheDate] < 30.0) {
-        return;
+- (void)invalidateFileAtURL:(NSURL *)url {
+    NSString *path = url.URLByStandardizingPath.path;
+    @synchronized (self) {
+        ++_latestRequest;
+        dispatch_async(self.workQueue, ^{
+            if (path) [self.fileEntries removeObjectForKey:path];
+            self.cacheDate = nil;
+        });
     }
-    NSMutableOrderedSet *labels = [NSMutableOrderedSet orderedSet];
-    NSMutableOrderedSet *cites = [NSMutableOrderedSet orderedSet];
-    NSMutableOrderedSet *envs = [NSMutableOrderedSet orderedSet];
-    NSMutableOrderedSet *cmds = [NSMutableOrderedSet orderedSet];
+}
 
-    if (self.projectRootURL) {
-        NSFileManager *fm = [NSFileManager defaultManager];
-        NSDirectoryEnumerator *en = [fm enumeratorAtURL:self.projectRootURL
-                             includingPropertiesForKeys:@[NSURLIsDirectoryKey, NSURLFileSizeKey]
-                                                options:NSDirectoryEnumerationSkipsHiddenFiles
-                                           errorHandler:nil];
+- (nullable NSString *)readCompletionTextAtURL:(NSURL *)url {
+    return [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil]
+        ?: [NSString stringWithContentsOfURL:url encoding:NSISOLatin1StringEncoding error:nil];
+}
+
+// 数组顺序固定为 label / citation / environment / command，文件与当前缓冲区共用提取路径。
+- (NSArray<NSArray<NSString *> *> *)symbolsInText:(NSString *)text bibliography:(BOOL)bib {
+    if (bib) return @[@[], [self.class citationKeysInBibText:text], @[], @[]];
+    return @[[self.class labelsInText:text], @[], [self.class environmentsInText:text], [self.class commandsInText:text]];
+}
+
+static BOOL TMCompletionEqual(id a, id b) { return a == b || [a isEqual:b]; }
+
+- (void)rescanIfNeededForRoot:(NSURL *)root excludingPath:(NSString *)excluded {
+    BOOL sameRoot = TMCompletionEqual(self.cacheRoot, root);
+    BOOL fresh = sameRoot && self.cacheDate && -self.cacheDate.timeIntervalSinceNow < 30.0;
+    if (fresh && TMCompletionEqual(self.excludedPath, excluded)) return;
+
+    if (!fresh) {
+        if (!sameRoot) [self.fileEntries removeAllObjects];
+        NSMutableArray<NSString *> *paths = [NSMutableArray array];
+        NSDirectoryEnumerator *en = root ? [[NSFileManager defaultManager] enumeratorAtURL:root
+                                            includingPropertiesForKeys:@[NSURLIsDirectoryKey]
+                                            options:NSDirectoryEnumerationSkipsHiddenFiles errorHandler:nil] : nil;
         NSUInteger scanned = 0;
         for (NSURL *url in en) {
             if (en.level > 4) { [en skipDescendants]; continue; }
@@ -209,37 +268,111 @@ static NSArray<NSString *> *TMCaptures(NSString *pattern, NSString *text) {
             BOOL isTeX = [ext isEqualToString:@"tex"] || [ext isEqualToString:@"ltx"] || [ext isEqualToString:@"latex"];
             BOOL isBib = [ext isEqualToString:@"bib"];
             if (!isTeX && !isBib) continue;
-            NSNumber *size = nil;
-            [url getResourceValue:&size forKey:NSURLFileSizeKey error:nil];
-            if (size.unsignedLongLongValue > 8 * 1024 * 1024) continue; // 跳过异常大文件
+            struct stat info;
+            if (stat(url.fileSystemRepresentation, &info) != 0 || info.st_size > 8 * 1024 * 1024) continue;
             if (++scanned > 400) break;
-
-            NSString *text = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:nil]
-                          ?: [NSString stringWithContentsOfURL:url encoding:NSISOLatin1StringEncoding error:nil];
-            if (!text) continue;
-            if (isBib) {
-                [cites addObjectsFromArray:[TMCompletionProvider citationKeysInBibText:text]];
-            } else {
-                [labels addObjectsFromArray:[TMCompletionProvider labelsInText:text]];
-                [envs addObjectsFromArray:[TMCompletionProvider environmentsInText:text]];
-                [cmds addObjectsFromArray:[TMCompletionProvider commandsInText:text]];
+            NSString *path = url.URLByStandardizingPath.path;
+            // inode 与 ctime 也参与：原子替换或保留 mtime 的等长编辑不能误命中。
+            NSArray *fingerprint = @[@(info.st_dev), @(info.st_ino), @(info.st_size),
+                @(info.st_mtimespec.tv_sec), @(info.st_mtimespec.tv_nsec),
+                @(info.st_ctimespec.tv_sec), @(info.st_ctimespec.tv_nsec)];
+            NSArray *entry = self.fileEntries[path];
+            if (!entry || ![entry[0] isEqual:fingerprint]) {
+                NSString *text = [self readCompletionTextAtURL:url];
+                if (!text) { [self.fileEntries removeObjectForKey:path]; continue; }
+                entry = @[fingerprint, [self symbolsInText:text bibliography:isBib]];
+                self.fileEntries[path] = entry;
             }
+            [paths addObject:path];
         }
+        NSSet *livePaths = [NSSet setWithArray:paths];
+        for (NSString *path in self.fileEntries.allKeys) {
+            if (![livePaths containsObject:path]) [self.fileEntries removeObjectForKey:path];
+        }
+        self.orderedPaths = paths;
+        self.cacheRoot = root;
+        self.cacheDate = [NSDate date];
+    }
+    NSMutableOrderedSet *labels = [NSMutableOrderedSet orderedSet];
+    NSMutableOrderedSet *cites = [NSMutableOrderedSet orderedSet];
+    NSMutableOrderedSet *envs = [NSMutableOrderedSet orderedSet];
+    NSMutableOrderedSet *cmds = [NSMutableOrderedSet orderedSet];
+
+    for (NSString *path in self.orderedPaths) {
+        if ([path isEqualToString:excluded]) continue;
+        NSArray *symbols = self.fileEntries[path][1];
+        [labels addObjectsFromArray:symbols[0]];
+        [cites addObjectsFromArray:symbols[1]];
+        [envs addObjectsFromArray:symbols[2]];
+        [cmds addObjectsFromArray:symbols[3]];
     }
 
     self.cachedLabels = labels.array;
     self.cachedCitations = cites.array;
     self.cachedEnvironments = envs.array;
     self.cachedCommands = cmds.array;
-    self.cacheDate = [NSDate date];
-    self.cacheRoot = self.projectRootURL;
+    self.excludedPath = excluded;
 }
 
 #pragma mark - 候选
 
 - (NSArray<NSString *> *)completionsForContext:(TMCompletionContext *)context currentText:(NSString *)currentText {
+    return [self completionsForContext:context currentText:currentText documentKey:nil revision:0];
+}
+
+static TMCompletionContext *TMCompletionSnapshot(TMCompletionContext *context) {
+    TMCompletionContext *snapshot = [TMCompletionContext new];
+    snapshot.kind = context.kind;
+    snapshot.partial = [context.partial copy];
+    snapshot.partialRange = context.partialRange;
+    return snapshot;
+}
+
+- (NSArray<NSString *> *)completionsForContext:(TMCompletionContext *)context currentText:(NSString *)text
+                                 documentKey:(NSString *)key revision:(NSUInteger)revision {
+    context = TMCompletionSnapshot(context); text = [text copy]; key = [key copy];
+    NSURL *root = self.projectRootURL;
+    __block NSArray *result;
+    void (^query)(void) = ^{ result = [self queryContext:context text:text documentKey:key revision:revision root:root]; };
+    if (dispatch_get_specific(TMCompletionQueueKey) == (__bridge void *)self) query();
+    else dispatch_sync(self.workQueue, query);
+    return result;
+}
+
+- (void)requestCompletionsForContext:(TMCompletionContext *)context currentText:(NSString *)text
+                        documentKey:(NSString *)key revision:(NSUInteger)revision
+                         completion:(void (^)(NSArray<NSString *> *))completion {
+    context = TMCompletionSnapshot(context); text = [text copy]; key = [key copy];
+    @synchronized (self) {
+        NSURL *root = _projectRootURL;
+        NSUInteger request = ++_latestRequest;
+        dispatch_async(self.workQueue, ^{
+            @synchronized (self) { if (request != self->_latestRequest) return; }
+            NSArray *result = [self queryContext:context text:text documentKey:key revision:revision root:root];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                @synchronized (self) { if (request != self->_latestRequest) return; }
+                completion(result);
+            });
+        });
+    }
+}
+
+- (NSArray<NSString *> *)queryContext:(TMCompletionContext *)context text:(NSString *)text
+                         documentKey:(NSString *)key revision:(NSUInteger)revision root:(NSURL *)root {
     if (context.kind == TMCompletionKindNone) return @[];
-    [self rescanIfNeeded];
+    NSString *excluded = key.isAbsolutePath ? key.stringByStandardizingPath : nil;
+    [self rescanIfNeededForRoot:root excludingPath:excluded];
+    BOOL bibliography = [key.pathExtension.lowercaseString isEqualToString:@"bib"];
+    if (context.kind != TMCompletionKindCitation || bibliography) {
+        BOOL same = self.currentSymbols && TMCompletionEqual(key, self.currentDocumentKey) &&
+            (key ? revision == self.currentRevision : [text isEqualToString:self.currentTextSnapshot]);
+        if (!same) {
+            self.currentSymbols = [self symbolsInText:text ?: @"" bibliography:bibliography];
+            self.currentDocumentKey = key;
+            self.currentRevision = revision;
+            self.currentTextSnapshot = key ? nil : text;
+        }
+    }
 
     NSMutableOrderedSet<NSString *> *pool = [NSMutableOrderedSet orderedSet];
     NSString *partial = context.partial ?: @"";
@@ -247,15 +380,16 @@ static NSArray<NSString *> *TMCaptures(NSString *pattern, NSString *text) {
 
     switch (context.kind) {
         case TMCompletionKindCitation:
+            if (bibliography) [pool addObjectsFromArray:self.currentSymbols[1]];
             [pool addObjectsFromArray:self.cachedCitations ?: @[]];
             break;
         case TMCompletionKindReference:
             // 当前文档（可能尚未保存）里的 label 放最前
-            [pool addObjectsFromArray:[TMCompletionProvider labelsInText:currentText ?: @""]];
+            [pool addObjectsFromArray:self.currentSymbols[0]];
             [pool addObjectsFromArray:self.cachedLabels ?: @[]];
             break;
         case TMCompletionKindEnvironment:
-            [pool addObjectsFromArray:[TMCompletionProvider environmentsInText:currentText ?: @""]];
+            [pool addObjectsFromArray:self.currentSymbols[2]];
             [pool addObjectsFromArray:self.cachedEnvironments ?: @[]];
             [pool addObjectsFromArray:[TMCompletionProvider builtinEnvironments]];
             break;
@@ -263,7 +397,7 @@ static NSArray<NSString *> *TMCaptures(NSString *pattern, NSString *text) {
             // partial 含反斜杠；候选也要带反斜杠
             matchPartial = partial.length > 0 ? [partial substringFromIndex:1] : @"";
             NSMutableOrderedSet *names = [NSMutableOrderedSet orderedSet];
-            [names addObjectsFromArray:[TMCompletionProvider commandsInText:currentText ?: @""]];
+            [names addObjectsFromArray:self.currentSymbols[3]];
             [names addObjectsFromArray:self.cachedCommands ?: @[]];
             [names addObjectsFromArray:[TMCompletionProvider builtinCommands]];
             for (NSString *n in names) [pool addObject:[@"\\" stringByAppendingString:n]];

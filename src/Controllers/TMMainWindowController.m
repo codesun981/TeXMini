@@ -688,6 +688,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)loadDocumentIntoEditor {
     if (self.documentModel) {
+        self.editorTextView.completionDocumentKey = self.documentModel.isScratch ? nil : self.documentModel.fileURL.URLByStandardizingPath.path;
         self.editorTextView.string = self.documentModel.content ?: @"";
         [self.editorTextView.undoManager removeAllActions];
         [self.editorTextView rehighlightAll];
@@ -735,6 +736,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)setProjectRootURL:(nullable NSURL *)url reload:(BOOL)reload {
+    [self.editorTextView dismissCompletion];
     self.projectRootURL = url.URLByStandardizingPath;
     self.completionProvider.projectRootURL = self.projectRootURL;
     [self.completionProvider invalidate];
@@ -830,6 +832,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)windowDidResignKey:(NSNotification *)notification {
+    [self.editorTextView dismissCompletion];
     // 切到别的程序 / 窗口时立刻落盘，不等计时器
     [self.autoSaveTimer invalidate];
     self.autoSaveTimer = nil;
@@ -939,6 +942,10 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)refreshWindowTitle {
+    NSString *key = self.documentModel.isScratch ? nil : self.documentModel.fileURL.URLByStandardizingPath.path;
+    if (key ? ![key isEqualToString:self.editorTextView.completionDocumentKey] : self.editorTextView.completionDocumentKey.isAbsolutePath) {
+        self.editorTextView.completionDocumentKey = key;
+    }
     self.window.title = [NSString stringWithFormat:@"TeXMini - %@", self.documentModel.displayName];
     self.window.representedURL = self.documentModel.isScratch ? nil : self.documentModel.fileURL;
     self.window.documentEdited = self.documentModel.isDirty;
@@ -1254,7 +1261,8 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 /// 我们自己写完磁盘后调用：记住新的修改时间（避免误报外部修改），并让补全重新扫描。
 - (void)didWriteCurrentFile {
     [self rememberCurrentFileModificationDate];
-    [self.completionProvider invalidate];
+    [self.completionProvider invalidateFileAtURL:self.documentModel.fileURL];
+    [self.editorTextView refreshCompletionIfNeeded];
 }
 
 - (void)cancelCompilation {

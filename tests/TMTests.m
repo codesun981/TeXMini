@@ -1122,6 +1122,7 @@ TM_TEST(test_format_usepackage_location) {
 #pragma mark - Runner
 
 #include "TMLineIndexTests.inc"
+#include "TMCompletionCacheTests.inc"
 
 int main(void) {
     @autoreleasepool {

@@ -20,6 +20,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, weak) id<TMEditorTextViewDelegate> editorDelegate;
 /// 提供 \cite / \ref / \begin / 命令 的候选；为 nil 时退回系统单词补全。
 @property (nonatomic, strong, nullable) TMCompletionProvider *completionProvider;
+/// 正式文档为规范化路径；设为 nil 时为未命名文档生成独立标识，同时取消旧请求。
+@property (nonatomic, copy, nullable) NSString *completionDocumentKey;
+/// 文件保存后索引可能更新，仅在补全会话仍活跃时刷新。
+- (void)refreshCompletionIfNeeded;
+- (void)dismissCompletion;
 
 - (void)setupEditor;
 /// 当前字符版本共用的行首索引；属性着色不使其失效。
