@@ -1,4 +1,5 @@
 #import "TMEditActions.h"
+#import "TMLaTeXScanner.h"
 
 @implementation TMEditActions
 
@@ -97,6 +98,34 @@
         NSRange after = NSMakeRange(NSMaxRange(m.range), NSMaxRange(searchRange) - NSMaxRange(m.range));
         if ([line rangeOfString:endToken options:0 range:after].location == NSNotFound) {
             return env;
+        }
+    }
+    return nil;
+}
+
++ (nullable NSString *)environmentToCloseInText:(NSString *)text atLocation:(NSUInteger)location {
+    if (location > text.length) return nil;
+    NSRange line = [text lineRangeForRange:NSMakeRange(location, 0)];
+    if ([text rangeOfString:@"\\begin" options:NSLiteralSearch range:NSMakeRange(line.location, location - line.location)].location == NSNotFound) return nil;
+
+    // 复用语法扫描器：注释、\verb、原样环境和宏定义中的假 begin/end 不参与配对。
+    TMLaTeXScanResult *scan = [TMLaTeXScanner scanString:text];
+    NSMutableDictionary<NSString *, NSNumber *> *ends = [NSMutableDictionary dictionary];
+    for (NSUInteger i = scan.regionCount; i > 0; i--) {
+        TMLaTeXRegion region = scan.regions[i - 1];
+        if (region.kind != TMLaTeXRegionEnvironment || region.range.location < line.location) continue;
+        NSString *token = [text substringWithRange:region.range];
+        NSRange brace = [token rangeOfString:@"{"];
+        if (brace.location == NSNotFound || ![token hasSuffix:@"}"]) continue;
+        NSString *name = [token substringWithRange:NSMakeRange(NSMaxRange(brace), token.length - NSMaxRange(brace) - 1)];
+        NSUInteger depth = ends[name].unsignedIntegerValue;
+        if ([token hasPrefix:@"\\end"]) {
+            ends[name] = @(depth + 1);
+        } else if (depth > 0) {
+            ends[name] = @(depth - 1);
+        } else if (NSMaxRange(region.range) <= location) {
+            // 逆序遇到的第一个未配对 begin，就是当前行最内层尚未闭合的环境。
+            return name;
         }
     }
     return nil;

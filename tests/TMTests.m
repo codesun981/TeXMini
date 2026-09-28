@@ -1129,6 +1129,7 @@ TM_TEST(test_format_usepackage_location) {
 #include "TMCompileTargetResolverTests.inc"
 #include "TMEngineCacheTests.inc"
 #include "TMCompilerLifecycleTests.inc"
+#include "TMEditorRegressionTests.inc"
 
 int main(void) {
     @autoreleasepool {

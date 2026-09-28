@@ -6,6 +6,7 @@
 @interface TMLaTeXScanResult ()
 @property (nonatomic, copy) NSArray<TMLaTeXHeading *> *headings;
 @property (nonatomic, copy) NSString *blockSignature;
+@property (nonatomic) NSUInteger sourceLength;
 @end
 
 @implementation TMLaTeXScanResult {
@@ -35,9 +36,10 @@
 }
 
 static int TMCompareRegions(const void *a, const void *b) {
-    NSUInteger la = ((const TMLaTeXRegion *)a)->range.location;
-    NSUInteger lb = ((const TMLaTeXRegion *)b)->range.location;
-    return la < lb ? -1 : (la > lb ? 1 : 0);
+    const TMLaTeXRegion *left = a, *right = b;
+    if (left->range.location != right->range.location) return left->range.location < right->range.location ? -1 : 1;
+    if (left->kind != right->kind) return left->kind < right->kind ? -1 : 1;
+    return left->range.length < right->range.length ? -1 : (left->range.length > right->range.length ? 1 : 0);
 }
 
 - (void)finish {
@@ -77,6 +79,44 @@ static int TMCompareRegions(const void *a, const void *b) {
     return NO;
 }
 
+- (NSRange)rangeAffectedComparedToScan:(TMLaTeXScanResult *)previous editedRange:(NSRange)editedRange {
+    if (!previous) return NSMakeRange(NSNotFound, 0);
+    NSInteger delta = (NSInteger)self.sourceLength - (NSInteger)previous.sourceLength;
+    NSInteger oldEditLength = (NSInteger)editedRange.length - delta;
+    if (editedRange.location > self.sourceLength || editedRange.length > self.sourceLength - editedRange.location ||
+        oldEditLength < 0 || editedRange.location > previous.sourceLength ||
+        (NSUInteger)oldEditLength > previous.sourceLength - editedRange.location) return NSMakeRange(0, self.sourceLength);
+
+    NSUInteger oldStart = editedRange.location, oldEnd = oldStart + (NSUInteger)oldEditLength;
+    NSRange changed = NSMakeRange(NSNotFound, 0);
+    NSUInteger i = 0, j = 0;
+    while (i < previous.regionCount || j < self.regionCount) {
+        TMLaTeXRegion oldRegion = {0, {0, 0}}, newRegion = {0, {0, 0}};
+        if (i < previous.regionCount) {
+            oldRegion = previous.regions[i];
+            NSRange r = oldRegion.range;
+            if (NSMaxRange(r) <= oldStart) {
+                // 编辑之前的区域保持坐标；边界处插入的文字不属于左侧区域。
+            } else if (r.location >= oldEnd) {
+                r.location = (NSUInteger)((NSInteger)r.location + delta);
+            } else {
+                NSUInteger start = MIN(r.location, oldStart);
+                NSUInteger end = NSMaxRange(r) >= oldEnd
+                    ? (NSUInteger)((NSInteger)NSMaxRange(r) + delta) : NSMaxRange(editedRange);
+                r = NSMakeRange(start, end - start);
+            }
+            oldRegion.range = r;
+        }
+        if (j < self.regionCount) newRegion = self.regions[j];
+        int order = i == previous.regionCount ? 1 : (j == self.regionCount ? -1 : TMCompareRegions(&oldRegion, &newRegion));
+        if (order == 0) { i++; j++; continue; }
+        NSRange r = order < 0 ? oldRegion.range : newRegion.range;
+        if (r.length > 0) changed = changed.location == NSNotFound ? r : NSUnionRange(changed, r);
+        if (order < 0) i++; else j++;
+    }
+    return changed;
+}
+
 @end
 
 #pragma mark - 扫描器
@@ -101,6 +141,9 @@ typedef NS_ENUM(NSInteger, TMMathMode) {
     NSMutableArray<TMLaTeXHeading *> *_headings;
     /// 自定义命令 → 它包装的标题命令（mysub → subsection）
     NSMutableDictionary<NSString *, NSString *> *_headingAliases;
+    /// 首次遇到未闭合参数才建立失败索引；正常文档不多做一次全文扫描。
+    NSMutableIndexSet *_unmatchedBraces;
+    NSMutableIndexSet *_unmatchedBrackets;
 }
 
 + (NSSet<NSString *> *)headingCommands {
@@ -155,6 +198,7 @@ typedef NS_ENUM(NSInteger, TMMathMode) {
     [string getCharacters:buffer range:NSMakeRange(0, _n)];
     _s = buffer;
     _result = [[TMLaTeXScanResult alloc] init];
+    _result.sourceLength = _n;
     _headings = [NSMutableArray array];
     _headingAliases = [NSMutableDictionary dictionary];
 
@@ -196,6 +240,8 @@ static BOOL TMIsLetter(unichar c) {
 
 /// i 指向 open；返回配对的 close 位置（跳过转义），找不到返回 NSNotFound
 - (NSUInteger)matchFrom:(NSUInteger)i open:(unichar)open close:(unichar)close {
+    NSMutableIndexSet *failed = open == '{' ? _unmatchedBraces : _unmatchedBrackets;
+    if ([failed containsIndex:i]) return NSNotFound;
     NSInteger depth = 0;
     for (NSUInteger j = i; j < _n; j++) {
         unichar c = _s[j];
@@ -204,7 +250,33 @@ static BOOL TMIsLetter(unichar c) {
         if (c == open) depth++;
         else if (c == close && --depth == 0) return j;
     }
+    if (!failed) {
+        failed = [self unmatchedOpeningsForOpen:open close:close];
+        if (open == '{') _unmatchedBraces = failed; else _unmatchedBrackets = failed;
+    }
+    [failed addIndex:i];
     return NSNotFound;
+}
+
+/// 一次栈扫描找到所有未配对的开括号。后续每个残缺标题可直接判失败，避免重复扫到 EOF。
+- (NSMutableIndexSet *)unmatchedOpeningsForOpen:(unichar)open close:(unichar)close {
+    NSUInteger count = 0, capacity = 64;
+    NSUInteger *stack = malloc(capacity * sizeof(NSUInteger));
+    for (NSUInteger j = 0; j < _n; j++) {
+        unichar c = _s[j];
+        if (c == '\\') { j++; continue; }
+        if (c == '%') { while (j < _n && _s[j] != '\n') j++; continue; }
+        if (c == open) {
+            if (count == capacity) { capacity *= 2; stack = realloc(stack, capacity * sizeof(NSUInteger)); }
+            stack[count++] = j;
+        } else if (c == close && count > 0) {
+            count--;
+        }
+    }
+    NSMutableIndexSet *failed = [NSMutableIndexSet indexSet];
+    for (NSUInteger j = 0; j < count; j++) [failed addIndex:stack[j]];
+    free(stack);
+    return failed;
 }
 
 /// 读 {name}；成功时返回名字并把 *end 设为 } 之后
@@ -448,7 +520,7 @@ static BOOL TMIsLetter(unichar c) {
         NSUInteger endLoc = [self findEnd:env from:contentStart];
         if (endLoc == NSNotFound) return argEnd; // 还没写 \end：先当普通环境
         [_result addRegion:(isComment ? TMLaTeXRegionComment : TMLaTeXRegionVerbatim) from:contentStart to:endLoc];
-        NSUInteger endArg = endLoc + 5 + env.length + 2;
+        NSUInteger endArg = endLoc + 5 + env.length + 1; // "\\end{" + name + "}"
         [_result addRegion:TMLaTeXRegionEnvironment from:endLoc to:endArg];
         return endArg;
     }

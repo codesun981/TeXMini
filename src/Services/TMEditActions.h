@@ -18,6 +18,10 @@ NS_ASSUME_NONNULL_BEGIN
 /// 若该行含未被注释的 \begin{X} 且同一行没有对应 \end{X}，返回 X；否则返回 nil。
 + (nullable NSString *)environmentToCloseInLine:(NSString *)line;
 
+/// 当前行光标前的 \begin{X} 若在全文中还没有配对的 \end{X}，返回 X。
+/// 跳过注释、原样代码与命令定义，支持同名嵌套；location 使用 NSString 的 UTF-16 坐标。
++ (nullable NSString *)environmentToCloseInText:(NSString *)text atLocation:(NSUInteger)location;
+
 /// 行首的空白（空格与 tab）。
 + (NSString *)leadingWhitespaceOfLine:(NSString *)line;
 

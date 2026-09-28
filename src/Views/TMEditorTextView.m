@@ -460,9 +460,10 @@ static unichar TMMatchingBracket(unichar c) {
             NSRange lineRange = [full lineRangeForRange:NSMakeRange(sel.location, 0)];
             NSString *currentLine = [full substringWithRange:lineRange];
             NSString *indent = [TMEditActions leadingWhitespaceOfLine:currentLine];
-            NSString *env = [self isLaTeX] ? [TMEditActions environmentToCloseInLine:currentLine] : nil;
+            NSString *env = [self isLaTeX] && sel.length == 0
+                ? [TMEditActions environmentToCloseInText:full atLocation:sel.location] : nil;
 
-            if (env && [self shouldAutoCloseEnvironment:env afterLineRange:lineRange]) {
+            if (env) {
                 NSString *block = [NSString stringWithFormat:@"\n%@%@\n%@\\end{%@}", indent, kTMIndentUnit, indent, env];
                 [super insertText:block replacementRange:replacementRange];
                 // 光标放在中间行末尾
@@ -478,17 +479,6 @@ static unichar TMMatchingBracket(unichar c) {
 
     [super insertText:string replacementRange:replacementRange];
     [self scheduleCommandCompletionIfNeeded];
-}
-
-/// 若紧接着的下一行已经是 \end{env}，说明用户只是在环境内部换行，不再重复补全。
-- (BOOL)shouldAutoCloseEnvironment:(NSString *)env afterLineRange:(NSRange)lineRange {
-    NSString *full = self.string;
-    NSUInteger next = NSMaxRange(lineRange);
-    if (next >= full.length) return YES;
-    NSRange nextLineRange = [full lineRangeForRange:NSMakeRange(next, 0)];
-    NSString *nextLine = [[full substringWithRange:nextLineRange] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    NSString *endToken = [NSString stringWithFormat:@"\\end{%@}", env];
-    return ![nextLine hasPrefix:endToken];
 }
 
 - (void)deleteBackward:(id)sender {
@@ -694,20 +684,19 @@ static unichar TMMatchingBracket(unichar c) {
     if (ctx.kind == TMCompletionKindEnvironment) [self closeEnvironmentAfterCompleting:word atLocation:range.location];
 }
 
-/// 选定 \begin{env} 后，若下一行还没有 \end{env}，顺手补上，并把光标停在环境体内
+/// 选定 \begin{env} 后，仅为全文中尚未闭合的环境补结束命令，并把光标停在环境体内。
 - (void)closeEnvironmentAfterCompleting:(NSString *)word atLocation:(NSUInteger)location {
     NSString *full = self.string;
     NSRange lineRange = [full lineRangeForRange:NSMakeRange(location, 0)];
     NSString *line = [full substringWithRange:lineRange];
     if ([line containsString:@"\\end{"]) return;
-    NSString *env = [TMEditActions environmentToCloseInLine:line];
+    NSUInteger lineEnd = NSMaxRange(lineRange);
+    if (lineEnd > lineRange.location && [full characterAtIndex:lineEnd - 1] == '\n') lineEnd--;
+    NSString *env = [TMEditActions environmentToCloseInText:full atLocation:lineEnd];
     if (!env || ![env isEqualToString:word]) return;
-    if (![self shouldAutoCloseEnvironment:env afterLineRange:lineRange]) return;
 
     // 跳过紧随的 “}”，在行尾插入 换行 + 缩进 + \end{env}
     NSString *indent = [TMEditActions leadingWhitespaceOfLine:line];
-    NSUInteger lineEnd = NSMaxRange(lineRange);
-    if (lineEnd > lineRange.location && [full characterAtIndex:lineEnd - 1] == '\n') lineEnd--;
     NSString *block = [NSString stringWithFormat:@"\n%@%@\n%@\\end{%@}", indent, kTMIndentUnit, indent, env];
     NSRange insertAt = NSMakeRange(lineEnd, 0);
     if (![self shouldChangeTextInRange:insertAt replacementString:block]) return;

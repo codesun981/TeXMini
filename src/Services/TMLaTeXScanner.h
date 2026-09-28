@@ -31,8 +31,13 @@ typedef struct {
 @property (nonatomic, readonly) NSUInteger regionCount;
 @property (nonatomic, readonly) const TMLaTeXRegion *regions;   // 按起点排序，公式里的注释会与公式区重叠
 @property (nonatomic, readonly) NSArray<TMLaTeXHeading *> *headings;
-/// 跨行的公式 / 代码块 / 注释环境的结构摘要。两次扫描的摘要不同，说明编辑改变了远处的着色，需要整篇重画。
+/// 长公式 / 代码块 / 注释环境的种类摘要；范围失效判断使用 rangeAffectedComparedToScan:editedRange:。
 @property (nonatomic, readonly) NSString *blockSignature;
+@property (nonatomic, readonly) NSUInteger sourceLength;
+
+/// 与上次扫描相比，需要在编辑段落之外重染的区域（新文本坐标）；没有变化返回 {NSNotFound, 0}。
+/// editedRange 是这两次扫描之间所有编辑在新文本中的包围范围。
+- (NSRange)rangeAffectedComparedToScan:(nullable TMLaTeXScanResult *)previous editedRange:(NSRange)editedRange;
 
 /// index 处是否在注释、代码块或原样参数里（括号匹配等应忽略这些位置）。二分查找。
 - (BOOL)isIgnorableAtIndex:(NSUInteger)index;

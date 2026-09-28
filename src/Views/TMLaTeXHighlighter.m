@@ -57,7 +57,7 @@ static NSString *gBaseFontName = @"Menlo";
     return NSMakeRange(start, end - start);
 }
 
-/// 每个文本存储上一次扫描的块结构摘要：摘要变了（例如刚打出 \begin{verbatim} 的 \end），整篇重画
+/// 每个文本存储上一次扫描的区域：与新扫描对齐后，只扩大实际变化的着色范围。
 static NSMapTable<NSTextStorage *, TMLaTeXScanResult *> *TMLastScans(void) {
     static NSMapTable *table;
     static dispatch_once_t once;
@@ -153,15 +153,14 @@ static NSMapTable<NSTextStorage *, NSNumber *> *TMSyntaxes(void) {
 
 + (NSRange)highlightLaTeX:(NSTextStorage *)textStorage inRange:(NSRange)range {
     NSString *string = textStorage.string;
-    // 整篇扫描（线性、很快），只重画编辑附近的段落；结构变了才整篇重画
+    // 扫描区域先按编辑位移对齐；块边界改变时重画旧/新区间，不让远处残留旧颜色。
     TMLaTeXScanResult *scan = [TMLaTeXScanner scanString:string];
     TMLaTeXScanResult *previous = [TMLastScans() objectForKey:textStorage];
     [TMLastScans() setObject:scan forKey:textStorage];
 
     NSRange scope = [self paragraphRangeForRange:range inString:string maxLines:200];
-    if (previous && ![previous.blockSignature isEqualToString:scan.blockSignature]) {
-        scope = NSMakeRange(0, string.length);
-    }
+    NSRange affected = [scan rangeAffectedComparedToScan:previous editedRange:range];
+    if (affected.location != NSNotFound) scope = NSUnionRange(scope, affected);
     if (scope.length == 0) return scope;
 
     NSFont *italicFont = [self baseFontWithTrait:NSItalicFontMask];
