@@ -16,6 +16,7 @@ references/
 /docs/
 /testcases/
 /sample/
+/AGENTS.md
 
 # LaTeX auxiliary files
 *.aux
