@@ -697,6 +697,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 
 - (void)loadDocumentIntoEditorPreservingCompilation:(BOOL)preserveCompilation {
     [_fontFix cancelPendingRequests];
+    [self.autoSaveTimer invalidate];
+    self.autoSaveTimer = nil;
     if (!preserveCompilation) [self resetCompilationState];
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];
@@ -873,7 +875,12 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         // 先确认并读入文档；取消切换或读取失败时保留原项目及诊断。
         if (![self openDocumentAtURL:main inProject:folderURL preservingCompilation:NO]) return;
     } else {
-        [self resetCompilationState];
+        if (![self confirmDiscardChangesWithTitle:@"打开其他文件夹前是否保存更改？"]) return;
+        // 没有主文件时进入空白编辑区，不能让新文件夹继续操作旧文档。
+        TMDocument *empty = [[TMDocument alloc] init];
+        empty.content = @"";
+        self.documentModel = empty;
+        [self loadDocumentIntoEditor];
         [self setProjectRootURL:folderURL reload:YES];
     }
     [TMRecentFiles noteFolderURL:folderURL];
@@ -882,8 +889,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     if (self.sidebarItem.isCollapsed) [self toggleOutlineSidebar];
 
     if (!main) {
-        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已打开文件夹 %@，未找到含 \\documentclass 的主文件", folderURL.lastPathComponent]];
-        // 编辑器里还是之前的文件，它不属于这个项目，别记进会话
+        [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已打开文件夹 %@，未找到主文件，请从侧栏选择文件", folderURL.lastPathComponent]];
         [TMRecentFiles noteSessionFolderURL:folderURL fileURL:nil selection:0];
     }
 }
@@ -1071,6 +1077,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         : self.documentModel.fileURL.lastPathComponent;
     if (!self.documentModel.isScratch && self.documentModel.fileURL) {
         panel.directoryURL = self.documentModel.fileURL.URLByDeletingLastPathComponent;
+    } else if (self.projectRootURL) {
+        panel.directoryURL = self.projectRootURL;
     }
 
     if ([panel runModal] != NSModalResponseOK || !panel.URL) return NO;
@@ -1194,6 +1202,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     // 任何一次新编译都不是“自动清理后的重试”（重试会在调用本方法之后再把标记设上）
     self.isRetryingAfterAutoClean = NO;
     if ([self isShowingWelcome]) return;
+    if (!self.documentModel.fileURL &&
+        [self.editorTextView.string stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet].length == 0) {
+        [self.statusBar showInfoMessage:@"请先打开文件或输入 LaTeX 内容"];
+        return;
+    }
     [_fontFix cancelPendingRequests];
     self.compilationContextGeneration++;
     self.documentModel.content = self.editorTextView.string;
