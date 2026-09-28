@@ -58,6 +58,9 @@ typedef NS_ENUM(NSInteger, TMTeXEngine) {
 /// 没有 latexmk 时才直接调用引擎单遍。
 - (void)compileFileAtURL:(NSURL *)texFileURL;
 - (void)cancelCompilation;
+/// 切换文档/项目时取消并立即丢弃旧任务的所有回调（包括已排队的日志和结果）。
+/// 不发送 compilerDidCancel，新文档可以立即开始编译。
+- (void)cancelCompilationAndDiscardResults;
 
 /// 根据用户选择 + 魔法注释 + 内容启发式，得出实际使用的引擎名（不看依赖的 .cls / .sty）。
 - (NSString *)effectiveEngineNameForContent:(NSString *)content;

@@ -74,8 +74,9 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 @property (nonatomic, strong) TMEditorTextView *editorTextView;
 @property (nonatomic, strong) NSScrollView *editorScrollView;
 @property (nonatomic, strong) TMLineNumberRulerView *lineNumberRuler;
-/// 最近一次编译解析出的问题，切换文件时据此重画行号槽标记。
+/// 最近一次编译解析出的问题；从问题列表跳转时保留，普通切换文档时清空。
 @property (nonatomic, copy) NSArray<TMLogIssue *> *lastIssues;
+@property (nonatomic, strong, nullable) NSURL *lastCompilationMainFileURL;
 @property (nonatomic, strong) NSView *pdfContainerView;
 @property (nonatomic, strong) TMPDFView *pdfView;
 @property (nonatomic, strong) NSView *pdfPlaceholderView;
@@ -103,6 +104,7 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
 /// 标题 1 对应 \chapter（book / report / 学位论文类）还是 \section；随编译目标一起在后台判断。
 @property (nonatomic, assign) BOOL headingUsesChapters;
 @property (nonatomic, assign) BOOL needsCompileAfterCurrent;
+@property (nonatomic, assign) NSUInteger compilationContextGeneration;
 @property (nonatomic, strong, readwrite, nullable) NSURL *currentPDFURL;
 @property (nonatomic, strong, readwrite, nullable) NSURL *projectRootURL;
 @property (nonatomic, strong) TMCompletionProvider *completionProvider;
@@ -690,6 +692,11 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 #pragma mark - 文档管理与加载
 
 - (void)loadDocumentIntoEditor {
+    [self loadDocumentIntoEditorPreservingCompilation:NO];
+}
+
+- (void)loadDocumentIntoEditorPreservingCompilation:(BOOL)preserveCompilation {
+    if (!preserveCompilation) [self resetCompilationState];
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];
     if (self.documentModel) {
@@ -859,16 +866,20 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         return;
     }
 
-    [self setProjectRootURL:folderURL reload:YES];
+    NSURL *main = [TMProject guessMainFileInDirectory:folderURL];
+    if (main) {
+        // 先确认并读入文档；取消切换或读取失败时保留原项目及诊断。
+        if (![self openDocumentAtURL:main inProject:folderURL preservingCompilation:NO]) return;
+    } else {
+        [self resetCompilationState];
+        [self setProjectRootURL:folderURL reload:YES];
+    }
     [TMRecentFiles noteFolderURL:folderURL];
     [self hideWelcome];
     self.outlineSidebarView.mode = TMSidebarModeFiles;
     if (self.sidebarItem.isCollapsed) [self toggleOutlineSidebar];
 
-    NSURL *main = [TMProject guessMainFileInDirectory:folderURL];
-    if (main) {
-        [self openDocumentAtURL:main];
-    } else {
+    if (!main) {
         [self.statusBar showInfoMessage:[NSString stringWithFormat:@"已打开文件夹 %@，未找到含 \\documentclass 的主文件", folderURL.lastPathComponent]];
         // 编辑器里还是之前的文件，它不属于这个项目，别记进会话
         [TMRecentFiles noteSessionFolderURL:folderURL fileURL:nil selection:0];
@@ -909,6 +920,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         mapped = [newURL.URLByStandardizingPath.path stringByAppendingString:[currentPath substringFromIndex:oldPath.length]];
     }
     if (!mapped) return;
+    [self resetCompilationState];
     self.documentModel.fileURL = [NSURL fileURLWithPath:mapped];
     [self refreshCompileTarget];
     [self refreshWindowTitle];
@@ -928,6 +940,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     NSString *trashedPath = url.URLByStandardizingPath.path;
     BOOL affected = [currentPath isEqualToString:trashedPath] || [currentPath hasPrefix:[trashedPath stringByAppendingString:@"/"]];
     if (!affected) return;
+    [self resetCompilationState];
     [self.fileWatcher stop];
     self.fileWatcher = nil;
     self.documentModel.content = self.editorTextView.string;
@@ -991,6 +1004,10 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)openDocumentAtURL:(NSURL *)url {
+    [self openDocumentAtURL:url inProject:nil preservingCompilation:NO];
+}
+
+- (BOOL)openDocumentAtURL:(NSURL *)url inProject:(nullable NSURL *)folderURL preservingCompilation:(BOOL)preserveCompilation {
     BOOL isDir = NO;
     if (![[NSFileManager defaultManager] fileExistsAtPath:url.path isDirectory:&isDir]) {
         [TMRecentFiles removeFileURL:url];
@@ -998,29 +1015,31 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         alert.messageText = @"文件不存在";
         alert.informativeText = [NSString stringWithFormat:@"找不到 “%@”，可能已被移动或删除。", url.path];
         [alert runModal];
-        return;
+        return NO;
     }
     if (isDir) {
         [self openFolderAtURL:url];
-        return;
+        return NO;
     }
     if (![TMProject isEditableFileURL:url]) {
         [[NSWorkspace sharedWorkspace] openURL:url];
-        return;
+        return NO;
     }
-    if (![self confirmDiscardChangesWithTitle:@"打开其他文件前是否保存更改？"]) return;
+    if (![self confirmDiscardChangesWithTitle:@"打开其他文件前是否保存更改？"]) return NO;
 
     NSError *error = nil;
     TMDocument *newDoc = [TMDocument documentWithContentsOfURL:url error:&error];
     if (newDoc) {
+        if (folderURL) [self setProjectRootURL:folderURL reload:YES];
         self.documentModel = newDoc;
-        [self loadDocumentIntoEditor];
-        [self.statusBar showReadyState];
+        [self loadDocumentIntoEditorPreservingCompilation:preserveCompilation];
         [TMRecentFiles noteFileURL:url];
+        return YES;
     } else {
         NSAlert *alert = [NSAlert alertWithError:error];
         [alert runModal];
     }
+    return NO;
 }
 
 - (BOOL)saveCurrentDocument {
@@ -1059,6 +1078,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
         [[NSAlert alertWithError:err] runModal];
         return NO;
     }
+    [self resetCompilationState];
     [self refreshCompileTarget];
     [self refreshWindowTitle];
     [TMRecentFiles noteFileURL:panel.URL];
@@ -1131,6 +1151,7 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
+    [self resetCompilationState];
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];
     [self saveSessionState];
@@ -1144,17 +1165,33 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     self.outlineDebounceTimer = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     if (!self.scratchDirectoryURL) return;
-    // 正在编译的是本窗口的暂存文档：先停掉，免得编译器往被删的目录里写
-    if (self.documentModel.isScratch && [self isCompiling]) [self cancelCompilation];
     [self removeScratchDirectory];
 }
 
 #pragma mark - 编译动作与回调
 
+/// 切换文档或项目时同时丢弃显示状态和旧任务，避免异步尾包把日志重新写回来。
+- (void)resetCompilationState {
+    self.compilationContextGeneration++;
+    [self.autoCompileTimer invalidate];
+    self.autoCompileTimer = nil;
+    self.needsCompileAfterCurrent = NO;
+    self.isRetryingAfterAutoClean = NO;
+    [[TMCompiler sharedCompiler] cancelCompilationAndDiscardResults];
+    self.lastCompilationMainFileURL = nil;
+    self.lastIssues = @[];
+    [self.logDrawer clearLog];
+    [self.logDrawer setIssues:@[]];
+    [self refreshIssueMarks];
+    if (self.logDrawer.isExpanded) [self.logDrawer toggleAnimated];
+    [self.statusBar showReadyState];
+}
+
 - (void)compileCurrentDocument {
     // 任何一次新编译都不是“自动清理后的重试”（重试会在调用本方法之后再把标记设上）
     self.isRetryingAfterAutoClean = NO;
     if ([self isShowingWelcome]) return;
+    self.compilationContextGeneration++;
     self.documentModel.content = self.editorTextView.string;
 
     // 如果还没有指定文件路径，暂存到临时工作空间，省去弹窗干扰
@@ -1171,7 +1208,8 @@ static const CGFloat kTMPDFSearchBarHeight = 34.0;
     [self.logDrawer clearLog];
     self.lastIssues = @[];
     [self refreshIssueMarks];
-    [[TMCompiler sharedCompiler] compileFileAtURL:[self mainFileURLForCompile]];
+    self.lastCompilationMainFileURL = [self mainFileURLForCompile];
+    [[TMCompiler sharedCompiler] compileFileAtURL:self.lastCompilationMainFileURL];
 }
 
 #pragma mark - 状态栏：编译目标与引擎
@@ -1223,10 +1261,11 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 }
 
 - (nullable NSURL *)fileURLForIssue:(TMLogIssue *)issue {
+    // 诊断路径始终相对产生它的主文件，不能随错误跳转后的编辑文件重新推断。
+    NSURL *main = self.lastCompilationMainFileURL;
     if (issue.filePath.length == 0) {
-        return [self mainFileURLForCompile];
+        return main;
     }
-    NSURL *main = [self mainFileURLForCompile];
     NSURL *base = main ? main.URLByDeletingLastPathComponent : self.projectRootURL;
     if (!base) return nil;
     return [NSURL fileURLWithPath:issue.filePath relativeToURL:base].URLByStandardizingPath;
@@ -1252,7 +1291,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
             [self.statusBar showInfoMessage:[NSString stringWithFormat:@"该问题来自 %@，文件不可打开", target.lastPathComponent]];
             return;
         }
-        [self openDocumentAtURL:target];
+        if (![self openDocumentAtURL:target inProject:nil preservingCompilation:YES]) return;
         if (![self issueBelongsToCurrentDocument:issue]) return; // 用户取消了切换
     }
     [self.editorTextView jumpToLine:issue.line column:1];
@@ -1354,7 +1393,9 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 - (void)runPendingAutoCompileIfNeeded {
     if (self.needsCompileAfterCurrent && self.autoCompileEnabled) {
         self.needsCompileAfterCurrent = NO;
+        NSUInteger generation = self.compilationContextGeneration;
         dispatch_async(dispatch_get_main_queue(), ^{
+            if (generation != self.compilationContextGeneration || !self.autoCompileEnabled) return;
             [self compileCurrentDocument];
         });
     } else {
@@ -1363,6 +1404,7 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 }
 
 - (void)compilerDidStartCompilingDocument:(NSURL *)fileURL engineName:(NSString *)engineName useLatexmk:(BOOL)useLatexmk {
+    self.lastCompilationMainFileURL = fileURL;
     if (useLatexmk) {
         engineName = [NSString stringWithFormat:@"latexmk · %@", engineName];
     }
@@ -1797,12 +1839,9 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 - (void)closeProjectAndShowWelcome {
     // 先记下会话：关掉项目后在首页退出，下次启动仍回到这个项目
     [self saveSessionState];
-    if ([self isCompiling]) [self cancelCompilation];
+    [self resetCompilationState];
     [self.autoSaveTimer invalidate];
     self.autoSaveTimer = nil;
-    [self.autoCompileTimer invalidate];
-    self.autoCompileTimer = nil;
-    self.needsCompileAfterCurrent = NO;
     [self.fileWatcher stop];
     self.fileWatcher = nil;
     [self removeScratchDirectory];
@@ -1810,13 +1849,8 @@ static NSString *TMEngineDisplayName(NSString *engine) {
     [self setProjectRootURL:nil reload:YES];
     self.documentModel = [TMDocument documentWithBlankTemplate];
     [self loadDocumentIntoEditor];
-    [self.logDrawer clearLog];
-    self.lastIssues = @[];
-    [self.logDrawer setIssues:@[]];
-    [self refreshIssueMarks];
     [self hidePDFSearchBar];
     [self showPDFIfExistsAtURL:nil];
-    [self.statusBar showReadyState];
     [self showWelcome];
     [self.wordCounter cancel];
     [self.compileTargetResolver cancel];
@@ -1884,6 +1918,11 @@ static NSString *TMEngineDisplayName(NSString *engine) {
 #pragma mark - TMStatusBarViewDelegate
 
 - (void)statusBarDidClickErrorLine:(NSInteger)line {
+    TMLogIssue *issue = [TMLogParser firstErrorInIssues:self.lastIssues];
+    if (issue) {
+        [self logDrawerView:self.logDrawer didSelectIssue:issue];
+        return;
+    }
     [self.editorTextView jumpToLine:line column:1];
     [self.window makeFirstResponder:self.editorTextView];
 }

@@ -415,14 +415,27 @@ static void TMTerminateProcessTree(pid_t pid) {
     if (self.isCompiling && self.currentTask) {
         self.wasCancelled = YES;
         // 只 terminate latexmk 的话，它拉起的 xelatex / bibtex 会变孤儿继续写 aux，连子进程一起结束
-        TMTerminateProcessTree(self.currentTask.processIdentifier);
+        if (self.currentTask.running) TMTerminateProcessTree(self.currentTask.processIdentifier);
     }
+}
+
+- (void)cancelCompilationAndDiscardResults {
+    NSTask *task = self.currentTask;
+    // 先让主队列上尚未执行的回调失效；终止进程和排空管道仍由原任务后台完成。
+    self.currentTask = nil;
+    self.isCompiling = NO;
+    self.wasCancelled = NO;
+    if (task.running) TMTerminateProcessTree(task.processIdentifier);
+}
+
+/// 独立创建任务，便于不依赖 TeX 安装的生命周期测试注入可控子进程。
+- (NSTask *)newCompilationTask {
+    return [NSTask new];
 }
 
 - (void)compileFileAtURL:(NSURL *)texFileURL {
     if (self.isCompiling) {
-        // 正在编译时再次触发：先杀掉旧任务，旧任务结束回调会被 wasCancelled 吞掉
-        [self cancelCompilation];
+        [self cancelCompilationAndDiscardResults];
     }
 
     NSString *content = [NSString stringWithContentsOfURL:texFileURL encoding:NSUTF8StringEncoding error:nil] ?: @"";
@@ -436,8 +449,8 @@ static void TMTerminateProcessTree(pid_t pid) {
 
     // 2. 决定引擎与命令行
     NSString *engineName = [self effectiveEngineNameForContent:content directoryURL:texFileURL.URLByDeletingLastPathComponent reason:NULL];
-    NSString *latexmkPath = [TMCompiler findExecutableNamed:@"latexmk"];
-    NSString *enginePath = [TMCompiler findExecutableNamed:engineName];
+    NSString *latexmkPath = [self.class findExecutableNamed:@"latexmk"];
+    NSString *enginePath = [self.class findExecutableNamed:engineName];
 
     NSString *workingDir = [texFileURL URLByDeletingLastPathComponent].path;
     NSString *auxDir = nil;
@@ -480,7 +493,7 @@ static void TMTerminateProcessTree(pid_t pid) {
         [self.delegate compilerDidStartCompilingDocument:texFileURL];
     }
 
-    NSTask *task = [[NSTask alloc] init];
+    NSTask *task = [self newCompilationTask];
     task.executableURL = [NSURL fileURLWithPath:execPath];
     task.currentDirectoryURL = [NSURL fileURLWithPath:workingDir];
     task.arguments = args;
@@ -505,14 +518,25 @@ static void TMTerminateProcessTree(pid_t pid) {
         [task launchAndReturnError:&launchError];
         if (launchError) {
             dispatch_async(dispatch_get_main_queue(), ^{
+                if (self.currentTask != task) return;
                 self.isCompiling = NO;
                 self.currentTask = nil;
-                if ([self.delegate respondsToSelector:@selector(compilerDidFailWithError:line:fullLog:issues:)]) {
+                if (self.wasCancelled) {
+                    self.wasCancelled = NO;
+                    if ([self.delegate respondsToSelector:@selector(compilerDidCancel)]) [self.delegate compilerDidCancel];
+                } else if ([self.delegate respondsToSelector:@selector(compilerDidFailWithError:line:fullLog:issues:)]) {
                     [self.delegate compilerDidFailWithError:launchError.localizedDescription line:0 fullLog:@"" issues:@[]];
                 }
             });
             return;
         }
+
+        // 取消可能早于后台 launch，此时尚无 PID；启动后再检查，避免留下继续写文件的旧进程。
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if ((self.currentTask != task || self.wasCancelled) && task.running) {
+                TMTerminateProcessTree(task.processIdentifier);
+            }
+        });
 
         // 在后台读管道：末尾不完整的 UTF-8 字节留到下一块再解码，
         // 日志每 0.15 秒合并推一次主线程（latexmk 多遍输出上万行时不再逐块刷 UI）
