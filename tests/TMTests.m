@@ -1121,6 +1121,8 @@ TM_TEST(test_format_usepackage_location) {
 
 #pragma mark - Runner
 
+#include "TMLineIndexTests.inc"
+
 int main(void) {
     @autoreleasepool {
         for (NSArray *entry in gTests) {

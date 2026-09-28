@@ -15,6 +15,7 @@ static NSString *const kTMIndentUnit = @"  ";
     /// 待高亮的范围（合并同一轮 runloop 内的多次编辑）；location == NSNotFound 表示没有。
     NSRange _pendingHighlightRange;
     BOOL _highlightScheduled;
+    TMLineIndex *_lineIndex;
 }
 
 - (void)setupEditor {
@@ -41,6 +42,10 @@ static NSString *const kTMIndentUnit = @"  ";
     [self registerForDraggedTypes:types];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(textStorageWillProcessEditingNotification:)
+                                                 name:NSTextStorageWillProcessEditingNotification
+                                               object:self.textStorage];
+    [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(textStorageDidProcessEditingNotification:)
                                                  name:NSTextStorageDidProcessEditingNotification
                                                object:self.textStorage];
@@ -48,6 +53,18 @@ static NSString *const kTMIndentUnit = @"  ";
 
 - (void)dealloc {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (TMLineIndex *)lineIndex {
+    if (!_lineIndex || _lineIndex.length != self.textStorage.length) {
+        _lineIndex = [[TMLineIndex alloc] initWithString:self.string];
+    }
+    return _lineIndex;
+}
+
+- (void)textStorageWillProcessEditingNotification:(NSNotification *)note {
+    // 在 didProcess / 选区及行号尺刷新之前失效，不依赖多个观察者的调用顺序。
+    if (((NSTextStorage *)note.object).editedMask & NSTextStorageEditedCharacters) _lineIndex = nil;
 }
 
 - (void)rehighlightAll {
@@ -759,17 +776,9 @@ static unichar TMMatchingBracket(unichar c) {
         [self invalidateCurrentLineHighlightForSelection:NSMakeRange(MIN(previous.location, text.length), 0)];
         [self invalidateCurrentLineHighlightForSelection:NSMakeRange(loc, 0)];
 
-        NSUInteger line = 1;
-        NSUInteger col = 1;
-        NSUInteger lastLineStart = 0;
-
-        for (NSUInteger i = 0; i < loc; i++) {
-            if ([text characterAtIndex:i] == '\n') {
-                line++;
-                lastLineStart = i + 1;
-            }
-        }
-        col = (loc - lastLineStart) + 1;
+        TMLineIndex *index = self.lineIndex;
+        NSUInteger line = [index lineNumberForCharacterIndex:loc];
+        NSUInteger col = loc - [index startOfLine:line] + 1;
 
         if ([self.editorDelegate respondsToSelector:@selector(editorTextViewDidChangeCursorPositionToLine:column:)]) {
             [self.editorDelegate editorTextViewDidChangeCursorPositionToLine:line column:col];

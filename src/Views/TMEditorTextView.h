@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import "TMCompletionProvider.h"
 #import "TMLaTeXHighlighter.h"
+#import "TMLineIndex.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -21,6 +22,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, strong, nullable) TMCompletionProvider *completionProvider;
 
 - (void)setupEditor;
+/// 当前字符版本共用的行首索引；属性着色不使其失效。
+@property (nonatomic, strong, readonly) TMLineIndex *lineIndex;
 /// 按什么规则着色；非 LaTeX 文件不做 $ 配对、\begin 补全和命令补全。换了规则会整篇重新着色。
 @property (nonatomic, assign) TMEditorSyntax syntax;
 - (void)jumpToLine:(NSInteger)lineNumber column:(NSInteger)column;

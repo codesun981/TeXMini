@@ -3,9 +3,7 @@
 @implementation TMLineNumberRulerView {
     NSDictionary *_attributes;
     NSDictionary<NSNumber *, NSNumber *> *_issueMarks;
-    /// 每行起始字符下标（升序）；正文变化后置空，用到时再用分块读取一次算出。
-    NSMutableData *_lineStarts;
-    NSUInteger _lineStartsTextLength;
+    TMLineIndex *_localLineIndex;
 }
 
 - (void)setIssueMarks:(NSDictionary<NSNumber *, NSNumber *> *)marks {
@@ -75,44 +73,16 @@
 }
 
 - (void)textStorageDidEdit:(NSNotification *)notification {
-    if (((NSTextStorage *)notification.object).editedMask & NSTextStorageEditedCharacters) _lineStarts = nil;
+    if (((NSTextStorage *)notification.object).editedMask & NSTextStorageEditedCharacters) _localLineIndex = nil;
 }
 
-/// 行首下标表：一次性按块取字符扫描，比逐个 characterAtIndex: 快一个数量级。
-- (const NSUInteger *)lineStartsForText:(NSString *)text count:(NSUInteger *)count {
-    if (!_lineStarts || _lineStartsTextLength != text.length) {
-        NSMutableData *starts = [NSMutableData dataWithCapacity:1024 * sizeof(NSUInteger)];
-        NSUInteger zero = 0;
-        [starts appendBytes:&zero length:sizeof(NSUInteger)];
-        NSUInteger length = text.length;
-        unichar buffer[4096];
-        for (NSUInteger offset = 0; offset < length; offset += 4096) {
-            NSUInteger n = MIN((NSUInteger)4096, length - offset);
-            [text getCharacters:buffer range:NSMakeRange(offset, n)];
-            for (NSUInteger i = 0; i < n; i++) {
-                if (buffer[i] == '\n') {
-                    NSUInteger next = offset + i + 1;
-                    [starts appendBytes:&next length:sizeof(NSUInteger)];
-                }
-            }
-        }
-        _lineStarts = starts;
-        _lineStartsTextLength = length;
+- (TMLineIndex *)lineIndexForText:(NSString *)text {
+    TMLineIndex *shared = self.lineIndexProvider ? self.lineIndexProvider() : nil;
+    if (shared) return shared;
+    if (!_localLineIndex || _localLineIndex.length != text.length) {
+        _localLineIndex = [[TMLineIndex alloc] initWithString:text];
     }
-    *count = _lineStarts.length / sizeof(NSUInteger);
-    return _lineStarts.bytes;
-}
-
-/// charIndex 所在的行号（从 1 开始）。
-- (NSUInteger)lineNumberForCharacterIndex:(NSUInteger)charIndex inText:(NSString *)text {
-    NSUInteger count = 0;
-    const NSUInteger *starts = [self lineStartsForText:text count:&count];
-    NSUInteger lo = 0, hi = count;   // 找最后一个 starts[i] <= charIndex
-    while (hi - lo > 1) {
-        NSUInteger mid = (lo + hi) / 2;
-        if (starts[mid] <= charIndex) lo = mid; else hi = mid;
-    }
-    return lo + 1;
+    return _localLineIndex;
 }
 
 - (void)frameDidChange:(NSNotification *)notification {
@@ -131,8 +101,7 @@
     NSUInteger length = text.length;
     if (length == 0) return;
 
-    NSUInteger numberOfLines = 0;
-    [self lineStartsForText:text count:&numberOfLines];
+    NSUInteger numberOfLines = [self lineIndexForText:text].lineCount;
 
     NSString *sample = [NSString stringWithFormat:@"%lu", (unsigned long)numberOfLines];
     NSSize size = [sample sizeWithAttributes:_attributes];
@@ -164,7 +133,7 @@
 
     NSRange visibleCharRange = [layoutManager characterRangeForGlyphRange:visibleGlyphRange actualGlyphRange:NULL];
 
-    NSUInteger lineNumber = [self lineNumberForCharacterIndex:visibleCharRange.location inText:text];
+    NSUInteger lineNumber = [[self lineIndexForText:text] lineNumberForCharacterIndex:visibleCharRange.location];
 
     NSUInteger charIndex = visibleCharRange.location;
     NSUInteger maxCharIndex = NSMaxRange(visibleCharRange);

@@ -275,6 +275,8 @@ static const CGFloat kTMDividerHandleWidth = 10.0;
     TMLineNumberRulerView *ruler = [[TMLineNumberRulerView alloc] initWithScrollView:_editorScrollView];
     _editorScrollView.verticalRulerView = ruler;
     _lineNumberRuler = ruler;
+    __weak TMEditorTextView *indexedEditor = _editorTextView;
+    ruler.lineIndexProvider = ^{ return indexedEditor.lineIndex; };
 
     [_splitView addSubview:_editorScrollView];
 
