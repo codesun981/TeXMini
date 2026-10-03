@@ -66,8 +66,6 @@ make install    # 构建并替换 /Applications/TeXMini.app
 
 感谢 [LINUX DO](https://linux.do)——一个真诚且热爱分享的技术社区。
 
-## 贡献与许可
+## 许可
 
-逻辑改动添加回归测试，界面改动构建后人工验证；不引入第三方运行时。编译功能使用 `src/Services/`，编辑界面使用 `src/Views/`；`build.sh` 自动收集 `src` 下的 `.m` 文件。
-
-TeXMini 采用 [MIT 许可](LICENSE)。SyncTeX 解析器由 Jérôme Laurens 编写，保留其原始许可及额外署名限制，见 [第三方声明](THIRD_PARTY_NOTICES.md)。
+TeXMini 采用 [MIT 许可](LICENSE)。第三方组件声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
