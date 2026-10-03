@@ -62,6 +62,10 @@ make install    # 构建并替换 /Applications/TeXMini.app
 
 新文档使用 UTF-8。已有文件保留可识别的编码；旧编码文件建议在文件起始的注释头中声明，例如 `% !TEX encoding = GBK`，也支持 `inputenc` 的编码声明。不能可靠识别或不能无损保存时会提示错误，避免将乱码写回源文件。将声明改成 UTF-8 后保存可进行无损转换。
 
+## 致谢
+
+感谢 [LINUX DO](https://linux.do) 社区的朋友们——你们的试用、反馈与建议，让 TeXMini 走得更稳、更远。
+
 ## 贡献与许可
 
 逻辑改动添加回归测试，界面改动构建后人工验证；不引入第三方运行时。编译功能使用 `src/Services/`，编辑界面使用 `src/Views/`；`build.sh` 自动收集 `src` 下的 `.m` 文件。
