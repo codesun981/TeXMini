@@ -64,7 +64,7 @@ make install    # 构建并替换 /Applications/TeXMini.app
 
 ## 致谢
 
-感谢 [LINUX DO](https://linux.do) 社区的朋友们——你们的试用、反馈与建议，让 TeXMini 走得更稳、更远。
+感谢 [LINUX DO](https://linux.do)——一个真诚且热爱分享的技术社区。
 
 ## 贡献与许可
 
